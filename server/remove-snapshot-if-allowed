@@ -1,0 +1,55 @@
+#!/bin/zsh
+# We need to check if we're removing the snapshot associated with the latest
+# successful backup. If yes, it's also the only successful backup, which is
+# another reason we can't remove it. If not, it cannot be the only
+# successful backup.
+
+DESTROYLOCK=/var/lock/korn.zfsbackup.zfs.destroy.lock
+PROPPREFIX=korn.zfsbackup
+
+function exec_destroy() {
+	echo "destroying expired snapshot $1" | logger --id -t "zfsbackup: "
+	if [[ -x $(which chpst) ]]; then
+		exec chpst -l "$DESTROYLOCK" zfs destroy -d "$1"
+	else
+		exec zfs destroy -d "$1"
+	fi
+}
+
+[[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+
+# exit silently if the snapshot doesn't exist; it was either removed
+# manually or by a cronjob, and there is nothing useful for this script to
+# do. Printing an error message would just result in mail being sent.
+zfs get -Hp -o value name "$1" 2>/dev/null >/dev/null || exit 0
+
+expires=$(zfs get -Hp -o value ${PROPPREFIX}:expires "$1") || {
+	echo "FATAL: couldn't read ${PROPPREFIX}:expires property of \"$1\"" >&2
+	exit 1
+}
+
+zmodload zsh/datetime
+
+[[ $EPOCHSECONDS -lt "$expires" ]] && exit 0 # Hasn't expired yet
+[[ "$expires" = never ]] && exit 0
+
+# TODO: don't expire snapshots of unsuccessful backups if there are no
+# successful ones
+[[ "$(zfs get -Hp -o value ${PROPPREFIX}:successful "$1")" = "false" ]] \
+	&& exec_destroy "$1"
+
+# At this point, we know the snapshot pertains to a successful backup.
+# We don't know if it's the latest successful one, so let's find out.
+
+origin=${1/@*}
+zfs list -H -d 1 -t snapshot -S creation -o ${PROPPREFIX}:successful,name $origin \
+	| grep '^true' \
+	| head -n 1 \
+	| read true latestsuccessful
+
+[[ "$1" = "$latestsuccessful" ]] && {
+	echo "$0: INFO: not removing \"$1\" as it's either the latest or the only snapshot of a successful backup." >&2
+	exit 0
+}
+
+exec_destroy "$1"

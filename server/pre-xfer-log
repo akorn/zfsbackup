@@ -1,0 +1,2 @@
+#!/bin/zsh
+echo "${0:t}[$RSYNC_PID]: transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) starting" >&2

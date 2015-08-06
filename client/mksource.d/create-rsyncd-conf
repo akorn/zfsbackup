@@ -1,0 +1,70 @@
+#!/bin/zsh
+
+REMOTEBACKUPPOOL=backup
+REMOTEBACKUPPATH="$(hostname)"
+REMOTE_APPEND_RSYNCD_CONF=0
+CLIENTNAME=$(hostname -f)
+FAKESUPER=true
+
+if autoload colors && colors 2>/dev/null ; then
+	BLUE="${fg_bold[blue]}"
+	RED="${fg_bold[red]}"
+	GREEN="${fg_bold[green]}"
+	CYAN="${fg_bold[cyan]}"
+	MAGENTA="${fg_bold[magenta]}"
+	YELLOW="${fg_bold[yellow]}"
+	WHITE="${fg_bold[white]}"
+	NO_COLOR="${reset_color}"
+fi
+
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
+if [[ "$FAKESUPER" = "false" ]]; then
+	nofakesuper="fake super = false
+uid = 0
+gid = 0
+"
+fi
+
+function create_stanza() {
+cat <<EOF
+
+[$BACKUPMODULE]
+path = /$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}
+hosts allow = $CLIENTNAME
+read only = false
+write only = true
+post-xfer exec = /var/lib/svn-checkout/misc-scripts/zfsbackup/server/make-snapshot
+auth users = $zbUSERNAME
+$nofakesuper
+EOF
+
+RESTOREMODULE="${BACKUPMODULE/backup_/restore_}"
+[[ "$BACKUPMODULE" = "$RESTOREMODULE" ]] && return 0
+RESTOREUSER=${zbUSERNAME/-writer/-reader}
+
+cat <<EOF
+[$RESTOREMODULE]
+path = /$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}
+hosts allow = $CLIENTNAME
+read only = true
+write only = false
+auth users = $RESTOREUSER
+$nofakesuper
+EOF
+}
+
+BACKUPSERVER="$(sed 's@rsync://@@;s@/.*@@' <"$zbSOURCENAME"/url)"
+BACKUPMODULE="$(cut -d/ -f4 <"$zbSOURCENAME"/url)"
+REMOTESUBDIR=${REMOTESUBDIR:-${${BACKUPMODULE#backup_}/_*}}
+REMOTERSYNCDCONF=${REMOTERSYNCDCONF:-/etc/rsyncd/conf.d/$REMOTESUBDIR/${BACKUPMODULE#backup_${REMOTESUBDIR}_}}
+if [[ "$REMOTE_APPEND_RSYNCD_CONF" = "1" ]]; then
+	echo "Attempting to append an appropriate rsyncd.conf stanza to $REMOTERSYNCDCONF on $BACKUPSERVER..."
+	create_stanza | ssh "$BACKUPSERVER" cat \>\> $REMOTERSYNCDCONF
+else
+	echo "Please append something like the following to $REMOTERSYNCDCONF on $BACKUPSERVER:"
+	echo "$YELLOW"
+	create_stanza
+	echo "$NO_COLOR"
+fi
+echo

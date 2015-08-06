@@ -1,0 +1,39 @@
+address = 1.2.3.4
+log file = /dev/stderr
+secrets file = /etc/rsyncd/secrets
+numeric ids = true
+munge symlinks = true
+fake super = yes
+exclude = /rsyncd-munged/***
+dont compress = 7z avi bz2 deb gz iso jpeg jpg mov mp3 mp4 ogg rar rpm tbz tgz xia z zip
+
+[backup_somebox_root]
+hosts allow = somebox-ip
+path = /backup/somebox/root
+read only = false
+write only = true
+auth users = somebox-writer
+post-xfer exec = /var/lib/svn-checkout/misc-scripts/zfsbackup/server/make-snapshot 
+
+[restore_somebox_root]
+hosts allow = somebox-ip
+path = /backup/somebox/root
+read only = true
+write only = false
+auth users = somebox-reader, joe
+
+[backup_somebox_var]
+hosts allow = somebox-ip
+path = /backup/somebox/var
+read only = false
+write only = true
+auth users = somebox-writer
+post-xfer exec = /var/lib/svn-checkout/misc-scripts/zfsbackup/server/make-snapshot 
+
+[restore_somebox_var]
+hosts allow = somebox-ip
+path = /backup/somebox/var
+read only = true
+write only = false
+auth users = somebox-reader, joe
+

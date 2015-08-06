@@ -1,0 +1,31 @@
+#!/bin/zsh
+
+REMOTEBACKUPPOOL=backup
+REMOTEBACKUPPATH="$(hostname)"
+BACKUPOWNER=nobody:nogroup
+CREATEREMOTEZFS=0
+
+if autoload colors && colors 2>/dev/null ; then
+	BLUE="${fg_bold[blue]}"
+	RED="${fg_bold[red]}"
+	GREEN="${fg_bold[green]}"
+	CYAN="${fg_bold[cyan]}"
+	MAGENTA="${fg_bold[magenta]}"
+	YELLOW="${fg_bold[yellow]}"
+	WHITE="${fg_bold[white]}"
+	NO_COLOR="${reset_color}"
+fi
+
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
+if [[ "$CREATEREMOTEZFS" = "1" ]]; then
+	BACKUPSERVER="$(sed 's@rsync://@@;s@/.*@@' <"$zbSOURCENAME"/url)"
+	echo "Attempting to run zfs create $REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t} on $BACKUPSERVER..."
+	ssh "$BACKUPSERVER" zfs create $REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}
+	ssh "$BACKUPSERVER" chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}'
+else
+	echo "Run the following command on your backup server to create the zfs instance we'll back $zbSOURCENAME up to:"
+	echo "$YELLOW"zfs create "$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}"
+	echo "chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}' $NO_COLOR"
+fi
+echo
