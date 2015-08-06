@@ -1,0 +1,196 @@
+#!/bin/zsh
+EXPIRE_DEFAULT="now + 3 days"
+EXPIRE_FAILED="$EXPIRE_DEFAULT"
+SCHEDULE_ATJOB=1
+PATH_TO_REMOVESNAP=/var/lib/svn-checkout/misc-scripts/zfsbackup/server/remove-snapshot-if-allowed
+NAMEPREFIX_DEFAULT=extra # will be part of snapshot name
+MINSIZE=262144
+MININODES=7
+IMAGE_DEFAULT="zfsbackup-NAMEPREFIX-%Y-%m-%d-%H%M"
+PROPPREFIX="korn.zfsbackup"
+
+# The following function can be overridden in the config as well as by
+# supplying a /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME script that takes
+# "expires" or "nameprefix" as its first argument. The 2nd argument is 1 if
+# the backup was successful and 0 if it was not.
+#
+# The default assumes that the first successful backup created in a year is
+# yearly; the first successful backup created in a month is monthly; the
+# first backup created in a week is weekly; and the first backup created on
+# a day is daily.
+#
+# (If several backups are taken on the same day, the first may end up being
+# yearly, the 2nd monthly, the 3rd weekly and the 4th daily.)
+#
+# Subsequent daily backups will get a suffix of $NAMEPREFIX_DEFAULT (which
+# defaults to "extra").
+#
+# Unsuccessful backups get a suffix of "failed" and expire in 3 days
+# ($EXPIRE_FAILED).
+#
+# By default,
+# * yearly backups expire in 6 years;
+# * monthly backups expire in 1 year;
+# * weekly backups expire in 2 months;
+# * daily backups expire in 1 week;
+# * extra backups expire in 3 days ($EXPIRE_DEFAULT)
+
+function expire_rule() {
+	[[ -x /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME ]] && {
+		expires=$(/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME expires $successful)
+		nameprefix=$(/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME	nameprefix $successful)
+		return 0
+	}
+	[[ "$successful" = "0" ]] && {
+		expires="$(date +%s --date "$EXPIRE_FAILED")"
+		nameprefix=failed
+		return 0
+	}
+	pushd "$RSYNC_MODULE_PATH/.zfs/snapshot"
+	is_first_yearly && {
+		expires="$(date +%s --date "now + 6 years")"
+		nameprefix=yearly
+		popd; return 0
+	}
+	is_first_monthly && {
+		expires="$(date +%s --date "now + 1 year")"
+		nameprefix=monthly
+		popd; return 0
+	}
+	is_first_weekly && {
+		expires="$(date +%s --date "now + 2 months")"
+		nameprefix=weekly-$isoweekyear-$week
+		popd; return 0
+	}
+	is_first_daily && {
+		expires="$(date +%s --date "now + 1 week")"
+		nameprefix=daily
+		popd; return 0
+	}
+	nameprefix="$NAMEPREFIX_DEFAULT"
+	expires="$(date +%s --date "$EXPIRE_DEFAULT")"
+	popd; return 0
+}
+
+function construct_snapshot_name() {
+	local name
+	local suffix
+	name="$origin" # Must begin with this
+	suffix="$(zfs get -Hp -o value $PROPPREFIX:image-default "$origin")"
+	[[ "$suffix" = "-" ]] && suffix="$IMAGE_DEFAULT"
+	suffix=${suffix/NAMEPREFIX/$nameprefix}
+	suffix="$(strftime "$suffix" $starttime)"
+	echo "$name@$suffix"
+}
+
+function is_first_yearly() {
+	pattern="^${IMAGE_DEFAULT/NAMEPREFIX*/yearly-$year-}"
+	ls -1 | grep -q "$pattern" && return 1
+	return 0
+}
+
+function is_first_monthly() {
+	pattern="^${IMAGE_DEFAULT/NAMEPREFIX*/monthly-$year-$month-}"
+	ls -1 | grep -q "$pattern" && return 1
+	return 0
+}
+
+function is_first_weekly() {
+	pattern="^${IMAGE_DEFAULT/NAMEPREFIX*/weekly-$isoweekyear-$week-}"
+	ls -1 | grep -q "$pattern" && return 1
+	return 0
+}
+
+function is_first_daily() {
+	pattern="^${IMAGE_DEFAULT/NAMEPREFIX*/daily-$year-$month-$day-}"
+	ls -1 | grep -q "$pattern" && return 1
+	return 0
+}
+
+# Get current date and time; we're not currently using every variable
+zmodload zsh/datetime
+starttime=$EPOCHSECONDS
+strftime      "%Y-%m-%d %Y   %m    %d  %G          %V   %j        %u        %H   %M" $starttime \
+	| read fulldate year month day isoweekyear week dayofyear dayofweek hour minute
+
+[[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+
+[[ -z "$RSYNC_MODULE_PATH" ]] && {
+	echo "${0:t}[$RSYNC_PID]: FATAL: RSYNC_MODULE_PATH is unset. Exiting." >&2
+	exit 1
+}
+[[ -z "$RSYNC_MODULE_NAME" ]] && {
+	echo "${0:t}[$RSYNC_PID]: WARNING: WTF. RSYNC_MODULE_NAME is unset. Continuing regardless, but this should not happen." >&2
+}
+
+mountpoint -q "$RSYNC_MODULE_PATH" || {
+	echo "${0:t}[$RSYNC_PID]: ERROR: $RSYNC_MODULE_PATH is not a mountpoint. This is not supported." >&2
+	exit 1
+}
+
+df --portability -t zfs "$RSYNC_MODULE_PATH" >/dev/null 2>/dev/null || {
+	echo "${0:t}[$RSYNC_PID]: ERROR: $RSYNC_MODULE_PATH is not zfs. This is not supported." >&2
+	exit 1
+}
+
+# Obtain dataset name
+df --portability -t zfs "$RSYNC_MODULE_PATH" | tail -n 1 | read origin rest
+
+# Construct snapshot name and properties
+unset properties
+partial=0
+minsize=$(zfs get -Hp -o value ${PROPPREFIX}:minsize "$origin")
+[[ "$minsize" = "-" ]] && minsize=$MINSIZE
+mininodes=$(zfs get -Hp -o value ${PROPPREFIX}:mininodes "$origin")
+[[ "$mininodes" = "-" ]] && mininodes=$MININODES
+sync # needed to make sure the usedbydataset value we're obtaining is final (?)
+actualsize="$(zfs get -Hp -o value usedbydataset "$origin")"
+df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
+if [[ "$minsize" -gt 0 ]]; then
+	if [[ "$actualsize" -lt "$minsize" ]]; then
+		echo "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize. Setting partial=1." | logger -s -t "${0:t}/$$" -p user.warning
+		partial=1
+	fi
+fi
+if [[ "$mininodes" -gt 7 ]]; then
+	if [[ "$actualinodes" -lt "$mininodes" ]]; then
+		echo "Actual inodes of $RSYNC_MODULE_PATH is $actualinodes, less than $mininodes. Setting partial=1." | logger -s -t "${0:t}/$$" -p user.warning
+		partial=1
+	fi
+fi
+[[ "$partial" = "1" ]] && properties=($properties -o ${PROPPREFIX}:partial=true) || properties=($properties -o ${PROPPREFIX}:partial=false)
+if [[ "$partial" = "0" ]] && [[ "$RSYNC_EXIT_STATUS" = "0" ]]; then
+	properties=($properties -o ${PROPPREFIX}:successful=true)
+	successful=1
+else
+	properties=($properties -o ${PROPPREFIX}:successful=false)
+	successful=0
+fi
+properties=($properties -o ${PROPPREFIX}:rsync_exit_status="$RSYNC_EXIT_STATUS")
+properties=($properties -o ${PROPPREFIX}:rsync_host_addr="$RSYNC_HOST_ADDR")
+properties=($properties -o ${PROPPREFIX}:rsync_host_name="$RSYNC_HOST_NAME")
+properties=($properties -o ${PROPPREFIX}:rsync_user_name="$RSYNC_USER_NAME")
+
+expire_rule # sets $nameprefix and $expires
+snapname=$(construct_snapshot_name)
+expires_readable="$(strftime "%Y-%m-%d %H:%M:%S" $expires)"
+
+properties=($properties -o ${PROPPREFIX}:expires="$expires")
+properties=($properties -o ${PROPPREFIX}:expires-readable="$expires_readable")
+
+echo "${0:t}[$RSYNC_PID]: transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) finished (exit status $RSYNC_EXIT_STATUS)." >&2
+echo "${0:t}[$RSYNC_PID}: Running zfs snapshot $properties[@] $snapname" >&2
+zfs snapshot $properties[@] "$snapname" >&2
+
+if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
+	if ! [[ "$expires" = "never" ]]; then
+		if [[ -x /usr/bin/at ]]; then
+			cd /
+			echo "${(q)PATH_TO_REMOVESNAP}" \"$snapname\" \
+				| at -t $(strftime "%Y%m%d%H%M.%S" "$expires")
+		else
+# TODO: actually, at(1) may be anywhere in the PATH.
+			echo "${0:t}[$RSYNC_PID]: ERROR: can't schedule atjob without /usr/bin/at." >&2
+		fi
+	fi
+fi

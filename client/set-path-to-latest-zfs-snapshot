@@ -1,0 +1,45 @@
+#!/bin/zsh
+#
+# usage: set-path-to-latest-zfs-snapshot zfs-dataset
+#
+# Only supports case where zfs-dataset is a mounted zfs instance.
+
+#coproc logger -p daemon.notice -t set-path-to-latest-zfs-snapshot
+#exec >&p
+#exec 2>&p
+
+myfs="${1:-$(head -n 1 zfs-dataset)}"
+mp=$(zfs get -Hp -o value mountpoint "$myfs")
+[[ "$mp[1]" = "/" ]] || {
+	grep "^$myfs " /proc/mounts | read foo mp foo
+}
+mountpoint -q "$mp/." || {
+	echo "$0: ERROR: the supposed mountpoint of '$myfs', '$mp', is not a mountpoint." >&2
+	exit 1
+}
+[[ -d "$mp/.zfs/snapshot/." ]] || {
+	echo "$0: ERROR: '$mp/.zfs/snapshot/.' doesn't exist." >&2
+	exit 2
+}
+zfs list -t snapshot -H -o name -S creation | grep "^${myfs}@" | head -n 1 | read snapshot
+snapshot="$(echo "$snapshot" | sed 's/[^@]*@//')"
+for i in {1..5}; do # This needs to be retried a few times because of some timing issue
+	pushd "$mp/.zfs/snapshot/$snapshot/." # switch to the directory to force it to become mounted
+	popd && break
+	sleep 0.5
+done
+if [[ -d "$mp/.zfs/snapshot/$snapshot/." ]]; then
+	if [[ -e path ]]; then
+		rm path || {
+			echo "$0: ERROR: failed to remove old 'path' symlink. Perhaps it's a real directory?" >&2
+			exit 3
+		}
+	fi
+	ln -sf "$mp/.zfs/snapshot/$snapshot" path || {
+		echo "$0: ERROR: failed to make 'path' a symlink to '$mp/.zfs/snapshot/$snapshot'." >&2
+		exit 4
+	}
+else
+	echo "$0: ERROR: $mp/.zfs/snapshot/$snapshot doesn't exist anymore; maybe we lost a race with a snapshot remove operation." >&2
+	exit 5
+fi

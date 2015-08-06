@@ -1,0 +1,239 @@
+#!/bin/zsh
+
+HARDLINKFILES=(username password no-sparse no-xattrs no-acls
+no-hard-links no-delete no-partial no-xdev no-inplace compress
+compress-level bwlimit timeout)
+COPYFILES=(exclude include files filter check pre-client post-client options)
+SOURCES=/etc/zfsbackup/sources.d
+SCRIPTS=/usr/local/share/zfsbackup
+DEFAULTDIR=/etc/zfsbackup/client-defaults
+MKSOURCE_D=/etc/zfsbackup/mksource.d
+REMOTEBACKUPPATH="$(hostname)"
+# Could be e.g. /mnt/zfsbackup
+BINDROOT=/mnt
+
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
+function flagfile() {
+	local docreate="$1"
+	local doremove="$2"
+	local filename="$zbSOURCENAME"/"$3"
+	[[ "$docreate" = "1" ]] && touch "$filename"
+	[[ "$doremove" = "1" ]] && [[ "$createdbyme[$3]" = "1" ]] && rm -f "$filename"
+}
+
+function construct_bind_path() {
+	local realpath="$1"
+	# Handle / specially
+	case "$realpath" in
+		/)
+			zbBINDPATH="$BINDROOT"/rootfs
+			;;
+		/*)
+			zbBINDPATH="$BINDROOT$realpath"
+			;;
+		*)
+			echo "path must be absolute, but '$realpath' isn't. Bailing out."
+			exit 111
+			;;
+	esac
+}
+
+function usage() {
+cat <<EOF
+zfsbackup-create-source takes the following arguments (which are evaluated in
+the below order):
+
+-p, --path	Path to the directory to be backed up. If not specified,
+		a path symlink will not be created.
+-r, --pre[@]	Pre-client script to run. Will be copied into the sources.d
+		dir unless --pre@ is used, in which case a symlink will be
+		created.
+-o, --post[@]	Post-client script; see --pre for details.
+-c, --check[@]	Check script; see --pre for details.
+-b, --bind	Use shipped pre-bindmount and post-bindmount script as
+		pre-client and post-client script, respectively.
+		These will bind mount the source fs to a temporary directory
+		and upload that, then unmount the directory. Useful if you
+		want to copy files that may be under mountpoints.
+-z, --zsnap	The path specified in --path refers to a zfs dataset that will
+		have been mounted when the backup is performed. Use a
+		pre-client script that sets the path to the latest snapshot of
+		this zfs dataset and mounts it (via .zfs/snapshot).
+-s, --snap	NOT IMPLEMENTED. Reserved for LVM snapshot support.
+-d, --dir	Name of sources.d directory to create. Will try to autogenerate
+		based on --path (so one of the two must be specified).
+-u, --username	Override remote username.
+-e, --exclude	Override exclude file.
+-i, --include	Override include file.
+--files		Override "files" file (for --files-from).
+-f, --filter	Override filter file.
+--no-sparse	Create no-sparse flag file.
+-S, --sparse	Remove no-sparse flag file.
+--no-xattrs	Create no-xattrs flag file.
+-X, --xattrs	Remove no-xattrs flag file.
+--no-acls	Create no-acls flag file.
+-A, --acls	Remove no-acls flag file.
+--no-hard-links Create no-hard-links flag file.
+-H, --hard-links Remove no-hard-links flag file.
+--no-delete	Create no-delete flag file.
+--delete	Remove no-delete flag file.
+--no-partial	Create no-partial flag file.
+-P, --partial	Remove no-partial flag file.
+--no-xdev	Create no-xdev flag file (will cross filesystem boundaries).
+-x, --xdev	Remove no-xdev flag file (won't cross filesystem boundaries;
+		this is the default).
+--no-inplace	Create no-inplace flag file.
+--inplace	Remove no-inplace flag file.
+--compress	Create compress flag file.
+--no-compress	Remove compress flag file.
+--compress-level Override compress level.
+--bwlimit	Override bwlimit.
+--url		Provide specific URL to back up to.
+
+See the README file for details.
+EOF
+}
+
+while [[ -n "$1" ]]; do
+	case "$1" in
+		-b|--bind)
+			zbLNPRECLIENT="$SCRIPTS/client/pre-bindmount"
+			zbLNPOSTCLIENT="$SCRIPTS/client/post-bindmount"
+			zbBIND="1"
+			;;
+		-z|--zsnap)
+			zbLNPRECLIENT="$SCRIPTS/client/set-path-to-latest-zfs-snapshot"
+			zbPATH_IS_ZFS="1"
+			;;
+		-s|--snap)
+			echo "$0: FATAL: Sorry, --snap is not yet implemented." >&2
+			exit 42
+			;;
+		-p|--path)		 shift;	zbPATH="$1";;
+		-r|--pre)		 shift;	zbPRECLIENT="$1";;
+		--pre@)			 shift;	zbLNPRECLIENT="$1";;
+		-o|--post)		 shift;	zbPOSTCLIENT="$1";;
+		--post@)		 shift;	zbLNPOSTCLIENT="$1";;
+		-c|--check)		 shift;	zbCHECK="$1";;
+		--check@)		 shift;	zbLNCHECK="$1";;
+		-d|--dir)		 shift;	zbSOURCENAME="$1";;
+		-u|--username)		 shift;	zbUSERNAME="$1";;
+		-e|--exclude)		 shift;	zbEXCLUDEFROM="$1";;
+		-i|--include)		 shift;	zbINCLUDEFROM="$1";;
+		--files)		 shift;	zbFILESFROM="$1";;
+		-f|--filter)		 shift;	zbFILTER="$1";;
+		--no-sparse) 			zbNOSPARSE="1";;
+		-S|--sparse) 			zbFORCESPARSE="1";;
+		--no-xattrs) 			zbNOXATTRS="1";;
+		-X|--xattrs) 			zbFORCEXATTRS="1";;
+		--no-acls) 			zbNOACLS="1";;
+		-A|--acls) 			zbFORCEACLS="1";;
+		--no-hard-links) 		zbNOHARDLINKS="1";;
+		-H|--hard-links) 		zbFORCEHARDLINKS="1";;
+		--delete) 			zbFORCEDELETE="1";;
+		--no-delete) 			zbNODELETE="1";;
+		--no-partial) 			zbNOPARTIAL="1";;
+		-P|--partial) 			zbFORCEPARTIAL="1";;
+		--no-xdev) 			zbNOXDEV="1";;
+		-x|--xdev) 			zbFORCEXDEV="1";;
+		--no-inplace) 			zbNOINPLACE="1";;
+		--inplace) 			zbFORCEINPLACE="1";;
+		--compress) 			zbCOMPRESS="1";;
+		--no-compress) 			zbNOCOMPRESS="1";;
+		--compress-level)        shift;	zbCOMPRESSLEVEL="$1";;
+		--bwlimit)	         shift;	zbBWLIMIT="$1";;
+		--url)		         shift;	zbURL="$1";;
+	esac
+	shift
+done
+
+if [[ -z "$zbSOURCENAME" ]]; then
+	if [[ -z "$zbPATH" ]]; then
+		echo "Sorry, either --dir or --path must be specified." >&2
+		usage
+		exit 1
+	else
+		if [[ "$zbPATH_IS_ZFS" = 1 ]]; then
+			temppath=$zbPATH
+		else
+			temppath=${zbPATH/\/}
+		fi
+		zbSOURCENAME="$SOURCES/${temppath//\//_}"
+	fi
+elif ! [[ "$zbSOURCENAME[1]" = "/" ]]; then
+	zbSOURCENAME="$SOURCES/$zbSOURCENAME"
+fi
+[[ -d "$zbSOURCENAME" ]] || mkdir -p "$zbSOURCENAME" || {
+	echo "FATAL: Couldn't create $zbSOURCENAME." >&2
+	exit 2
+}
+# At this point, zbSOURCENAME is an absolute path to a directory that exists.
+
+unset createdbyme
+typeset -A createdbyme
+for i in $HARDLINKFILES[@]; do
+	if [[ -e "$DEFAULTDIR/$i" ]] && ln "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence no -f
+		createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
+	fi
+done
+
+for i in $COPYFILES[@]; do
+	if [[ -e "$DEFAULTDIR/$i" ]] && cp -an "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence -n
+		createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
+	fi
+done
+
+[[ -n "$zbURL" ]] && echo "$zbURL" >"$zbSOURCENAME"/url
+if [[ -z "$zbURL" ]] && [[ -r $DEFAULTDIR/url-template ]]; then
+	zbURL="$(sed "s/__PATH__/backup_${REMOTEBACKUPPATH}_${zbSOURCENAME:t}/g" <$DEFAULTDIR/url-template)"
+	unsetopt CLOBBER
+	echo "$zbURL" > "$zbSOURCENAME/url"
+	setopt CLOBBER
+fi
+if [[ -z "$zbURL" ]] && [[ -r "$zbSOURCENAME/url" ]]; then
+	zbURL="$(head -n 1 "$zbSOURCENAME/url")"	# We must set this for mksource.d scripts
+fi
+
+if [[ "$zbBIND" = 1 ]]; then
+	construct_bind_path "$zbPATH"
+	[[ -n "$zbBINDPATH" ]] && ln -s "$zbBINDPATH" "$zbSOURCENAME"/path
+	[[ -n "$zbPATH" ]] && ln -s "$zbPATH" "$zbSOURCENAME"/realpath
+else
+	[[ -n "$zbPATH" ]] && ln -s "$zbPATH" "$zbSOURCENAME"/path
+fi
+[[ -n "$zbPRECLIENT" ]] && cp -a "$zbPRECLIENT" "$zbSOURCENAME"/pre-client
+[[ -n "$zbLNPRECLIENT" ]] && ln -sf "$zbLNPRECLIENT" "$zbSOURCENAME"/pre-client
+[[ -n "$zbPOSTCLIENT" ]] && cp -a "$zbPOSTCLIENT" "$zbSOURCENAME"/post-client
+[[ -n "$zbLNPOSTCLIENT" ]] && ln -sf "$zbLNPOSTCLIENT" "$zbSOURCENAME"/post-client
+[[ -n "$zbCHECK" ]] && cp -a "$zbCHECK" "$zbSOURCENAME"/check
+[[ -n "$zbLNCHECK" ]] && ln -sf "$zbLNCHECK" "$zbSOURCENAME"/check
+if [[ "$zbLNPRECLIENT" = "$SCRIPTS/client/set-path-to-latest-zfs-snapshot" ]]; then
+	if [[ -n "$zbPATH" ]]; then
+		echo "$zbPATH" > "$zbSOURCENAME/zfs-dataset"
+	else
+		echo "Warning: --zsnap specified without --path. Results are undefined." >&2
+	fi
+fi
+[[ -n "$zbUSERNAME" ]] && echo "$zbUSERNAME" >"$zbSOURCENAME"/username
+[[ -z "$zbUSERNAME" ]] && [[ -f "$zbSOURCENAME/username" ]] && zbUSERNAME="$(head -n 1 $zbSOURCENAME/username)"
+[[ -n "$zbEXCLUDEFROM" ]] && cp "$zbEXCLUDEFROM" "$zbSOURCENAME"/exclude
+[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
+[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
+[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
+flagfile "$zbNOSPARSE" "$zbFORCESPARSE" no-sparse
+flagfile "$zbNOXATTRS" "$zbFORCEXATTRS" no-xattrs
+flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
+flagfile "$zbNOHARDLINKS" "$zbFORCEHARDLINKS" no-hard-links
+flagfile "$zbNODELETE" "$zbFORCEDELETE" no-delete
+flagfile "$zbNOPARTIAL" "$zbFORCEPARTIAL" no-partial
+flagfile "$zbNOXDEV" "$zbFORCEXDEV" no-xdev
+flagfile "$zbNOINPLACE" "$zbFORCEINPLACE" no-inplace
+flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
+[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
+[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
+[[ -n "$zbBWLIMIT" ]] && echo "$zbBWLIMIT" >"$zbSOURENAME"/bwlimit
+if [[ -n "$MKSOURCE_D" ]] && [[ -d "$MKSOURCE_D/." ]]; then
+	export zbSOURCENAME zbURL zbPATH zbUSERNAME
+	run-parts -v -u $(umask) "$MKSOURCE_D"
+fi

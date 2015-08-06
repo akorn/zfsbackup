@@ -1,0 +1,171 @@
+#!/bin/zsh
+SOURCES=/etc/zfsbackup/sources.d
+[[ -x /usr/bin/chpst ]] && lockprog="chpst"
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
+zmodload zsh/mapfile
+zmodload zsh/datetime
+
+# Run args with a lock held
+function with_lock() {
+	case "$lockprog" in
+		chpst)
+			chpst -L "/var/lock/zfsbackup-client.${source//\//_}.lock" $@;;
+		"")
+			$@;;
+		*)
+			echo "$0: WARNING: unsupported lockprog '$lockprog'. Continuing without locking." >&2
+			$@;;
+	esac
+}
+
+function get_sources() {
+	if [[ -n "$1" ]]; then
+		for i in $*; do
+			[[ "$i[1]" = "/" ]] && echo $i || echo $SOURCES/$i
+		done
+	else
+		echo $SOURCES/*(/)
+	fi
+	return 0
+}	
+
+final_exit_status=0
+export source
+
+function start_logger() {
+	# starts a logger coprocess if one doesn't exist already
+	[[ -z "$have_logger" ]] && coproc logger --id -t "zfsbackup: $source"
+	have_logger=1
+}
+
+for source in $(get_sources $*); do
+	unset rsync_options
+	unset USER
+	unset preclient_exit
+	unset rsync_exit
+	echo "$0: INFO: processing $source." >&2
+	cd "$source" || {
+		echo "$0: WARNING: can't chdir to $source. Skipping." >&2
+		continue
+	}
+	[[ -r url ]] || {
+		echo "$0: ERROR: $source is missing url. Skipping." >&2
+		continue
+	}
+	url="$(head -n 1 url)"
+	rsync_options=(-H)
+	[[ -r username ]] && export LOGNAME=$(head -n 1 username)
+	[[ -r password ]] && rsync_options=($rsync_options --password-file="$(pwd)/password")
+	[[ -r exclude ]] && rsync_options=($rsync_options --exclude-from="$(pwd)/exclude")
+	[[ -r include ]] && rsync_options=($rsync_options --include-from="$(pwd)/include")
+	[[ -r files ]] && rsync_options=($rsync_options --files-from="$(pwd)/files")
+	[[ -r filter ]] && rsync_options=($rsync_options $(sed 's/^/--filter /' <filter))
+	[[ -e no-xattrs ]] || rsync_options=($rsync_options -X)
+	[[ -e no-acls ]] || rsync_options=($rsync_options -A)
+	[[ -e no-xdev ]] || rsync_options=($rsync_options -x)
+	[[ -e no-delete ]] || rsync_options=($rsync_options --delete)
+	[[ -e no-partial ]] || rsync_options=($rsync_options --partial)
+	[[ -e no-inplace ]] || rsync_options=($rsync_options --inplace)
+	[[ -e no-inplace ]] && ! [[ -e no-sparse ]] && rsync_options=($rsync_options -S)
+	[[ -e compress ]] && rsync_options=($rsync_options -z)
+	[[ -r compress-level ]] && rsync_options=($rsync_options --compress-level="$mapfile[compress-level]")
+	[[ -r bwlimit ]] && rsync_options=($rsync_options --bwlimit="$mapfile[bwlimit]")
+	[[ -r timeout ]] && rsync_options=($rsync_options --timeout="$mapfile[timeout]") \
+		|| rsync_options=($rsync_options --timeout=3600)
+	[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
+	( # subshell so that we can redirect stdout/stderr safely, as well as use 'exit'
+		starttime=$EPOCHSECONDS
+		fsuuid=UNKNOWN
+		snapuuid=N/A
+		fstype=UNKNOWN
+		[[ -e stdout ]] && exec >stdout || {
+			start_logger
+			exec >&p
+		}
+		[[ -e stderr ]] && exec 2>stderr || {
+			start_logger
+			exec 2>&p
+		}
+		if [[ -x check ]]; then
+			with_lock ./check
+			check_result="$?"
+			[[ "$check_result" = "0" ]] || {
+# logging
+				echo "$EPOCHSECONDS CHECKFAILED_$check_result $source"
+# end logging
+				exit $check_result
+			}
+		fi
+# Not reached if check_result != 0
+		if [[ -x pre-client ]]; then
+			with_lock ./pre-client
+			preclient_exit="$?"
+		else
+			preclient_exit="0"
+		fi
+		if [[ -d pre-client.d ]]; then
+			with_lock run-parts --report ./pre-client.d
+			((preclient_exit+=$?))
+		fi
+		if [[ "$preclient_exit" = "0" ]]; then
+			[[ -f path ]] && mypath="$(head -n 1 path)"
+			[[ -f path ]] || mypath=path/.
+			if [[ -z "$mypath" ]]; then
+				echo "$0: FATAL: mypath variable was empty while processing $source." >&2
+				rsync_exit=111
+			else
+				for kludge in 1 2 3 4; do	# switching to auto-mounted zfs snapshots doesn't always work on the first try
+					cd "$mypath" && cdsuccess=1 && break
+					sleep 0.5
+				done
+				if [[ "$cdsuccess" = "1" ]]; then
+					with_lock rsync -a $rsync_options[@] . "$url"
+					rsync_exit="$?"
+					if [[ "$rsync_exit" = 0 ]]; then
+						touch "$source/stamp-success"
+						rm -f "$source/stamp-failure" 2>/dev/null
+					else
+						# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
+						echo "$rsync_exit" >"$source/stamp-failure"
+					fi
+				else
+					echo "$0: FATAL: unable to chdir to $mydir." >&2
+					rsync_exit=111
+				fi
+			fi
+		fi
+		cd "$source"
+		if [[ -x post-client ]]; then
+			with_lock ./post-client "$preclient_exit" "$rsync_exit"
+			postclient_exit=$?
+		else
+			postclient_exit=0
+		fi
+		if [[ -d post-client.d ]]; then
+			with_lock run-parts --report --arg "$preclient_exit" "$rsync_exit" post-client.d
+			((postclient_exit+=$?))
+		fi
+# logging (will become inventory later)
+		[[ -e fsuuid ]] && fsuuid=$(cat fsuuid)
+		[[ -e snapuuid ]] && snapuuid=$(cat snapuuid)
+		[[ -e fstype ]] && fstype=$(cat fstype)
+		echo -n "$EPOCHSECONDS "
+		if [[ $rsync_exit = 0 ]]; then
+			echo -n "RSYNC_SUCCESS "
+		else
+			echo -n "RSYNC_FAIL_$rsync_exit "
+		fi
+		echo -n "$source "
+		echo -n "$fsuuid "
+		echo -n "$snapuuid "
+		echo -n "$url "
+		echo -n "$fstype "
+		echo -n "$preclient_exit "
+		echo -n "$postclient_exit "
+		echo "$starttime"
+		exit $[rsync_exit+postclient_exit]
+	)
+	((final_exit_status+=$?))
+done
+exit $final_exit_status

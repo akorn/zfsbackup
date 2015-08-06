@@ -1,0 +1,14 @@
+#!/bin/zsh
+PATH_TO_REMOVESNAP=/var/lib/svn-checkout/misc-scripts/zfsbackup/server/remove-snapshot-if-allowed
+PROPPREFIX="korn.zfsbackup"
+[[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+
+zmodload zsh/datetime
+
+zfs list -H -t snapshot -o ${PROPPREFIX}:expires,name \
+	| while read expires name; do
+		[[ "$expires" = "-" ]] && continue # Doesn't have the property
+		[[ $EPOCHSECONDS -lt "$expires" ]] && continue # Hasn't expired yet
+		[[ "$expires" = never ]] && continue
+		$PATH_TO_REMOVESNAP "$name" </dev/null # Make sure it doesn't read our input
+	done

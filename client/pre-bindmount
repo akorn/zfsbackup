@@ -1,0 +1,27 @@
+#!/bin/zsh
+zbPATH=$(readlink -f ./path)
+zbREALPATH=$(readlink -f ./realpath)
+[[ -z "$zbREALPATH" ]] && {
+	echo "$0: FATAL: don't know what to bind mount! $(ls -l realpath 2>&1)" >&2
+	exit 111
+}
+[[ -z "$zbPATH" ]] && {
+	echo "$0: FATAL: don't know where to bind mount $zbREALPATH! $(ls -l path 2>&1)" >&2
+	exit 111
+}
+[[ -d "$zbREALPATH/." ]] || {
+	echo "$0: FATAL: '$zbREALPATH' is not a directory!" >&2
+	exit 111
+}
+[[ "$zbREALPATH[1]" = "/" ]] || {
+	echo "$0: FATAL: '$zbREALPATH' is not absolute!" >&2
+	exit 111
+}
+[[ -d "$zbPATH" ]] || mkdir -p "$zbPATH" || {
+	echo "$0: FATAL: '$zPATH' doesn't exist and I was unable to create it." >&2
+	exit 111
+}
+mount --bind "$zbREALPATH" "$zbPATH" || {
+	echo "$0: FATAL: mount --bind '$zbREALPATH' '$zbPATH' failed." >&2
+	exit 111
+}
