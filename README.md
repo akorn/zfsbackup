@@ -19,73 +19,72 @@ It first reads defaults from /etc/zfsbackup/client.conf, then iterates over
 the directories in /etc/zfsbackup/sources.d, each of which can contain the
 following files and directories:
 
-url		rsync URL to upload to (single line; subsequent lines are ignored)
-username	username to send to rsyncd
-password	password to send to rsyncd
+url		rsync URL to upload to (single line; subsequent lines are ignored)  
+username	username to send to rsyncd  
+password	password to send to rsyncd  
 stdout		if exists, stdout will be redirected into it; could be a
-		symlink or a fifo
+		symlink or a fifo  
 		Later versions may check if it's executable and if it is, run
-		it and pipe stdout into it that way.
-stderr		like above, but for standard error
-exclude		will be passed to rsync using exclude-from
-include		will be passed to rsync using include-from
-files		will be passed to rsync using files-from
-filter		will be passed to rsync using --filter (one per line)
+		it and pipe stdout into it that way.  
+stderr		like above, but for standard error  
+exclude		will be passed to rsync using exclude-from  
+include		will be passed to rsync using include-from  
+files		will be passed to rsync using files-from  
+filter		will be passed to rsync using --filter (one per line)  
 options		further options to pass to rsync, one per line
-		The last line should not have a trailing newline.
-		Untested.
+		The last line should not have a trailing newline.  
 path		if it's a symlink to a directory, the directory to copy;
 		if it's a file or a symlink to a file, the first line is
-		taken to be the name of the directory to copy.
+		taken to be the name of the directory to copy.  
 check		a script to run before doing anything else; decides whether
 		to upload this directory at this time or not. Upload only
 		proceeds if ./check exits successfully. Not even pre-client
-		is run otherwise.
+		is run otherwise.  
 pre-client	a script to run on the client before copying begins;
 		if it returns unsuccessfully, rsync is not started,
 		but post-client is still run.
 		The supplied client/set-path-to-latest-zfs-snapshot script
 		can be used to find the latest existing snapshot of a given
 		zfs dataset and make the path symlink point to it (in
-		.zfs/snapshot).
+		.zfs/snapshot).  
 pre-client.d/	a directory that will be passed to run-parts (after
-		pre-client has been run, if it exists).
+		pre-client has been run, if it exists).  
 post-client	a script to run on the client after copying finished.
 		Its first argument is the exit status of pre-client; the 2nd
-		argument is the exit status of rsync (provided it was run).
+		argument is the exit status of rsync (provided it was run).  
 post-client.d/	a directory that will be passed to run-parts (after
-		post-client has been run, if it exists).
+		post-client has been run, if it exists).  
 no-sparse	if it exists, -S will not be passed to rsync (but "options"
 		can override). -S is the default if no-inplace exists.
-		(rsync doesn't support inplace and sparse simultaneously.)
-no-xattrs	like no-sparse, but for -X
-no-acls		like no-sparse, but for -A
-no-hard-links	like no-sparse, but for -H
-no-delete	like no-sparse, but for --delete
-no-partial	like no-sparse, but for --partial
+		(rsync doesn't support inplace and sparse simultaneously.)  
+no-xattrs	like no-sparse, but for -X  
+no-acls		like no-sparse, but for -A  
+no-hard-links	like no-sparse, but for -H  
+no-delete	like no-sparse, but for --delete  
+no-partial	like no-sparse, but for --partial  
 no-xdev		like no-sparse, but for -x (the default is to *not* cross
-		filesystems)
+		filesystems)  
 no-inplace	like no-sparse, but for --inplace (in-place updates are more
-		space efficient with zfs snapshots unless dedup is also used)
-compress	if it exists, rsync will be called with -z
+		space efficient with zfs snapshots unless dedup is also used)  
+compress	if it exists, rsync will be called with -z  
 compress-level	if it exists, contents will be appended to --compress-level=
 		Warning: the file should contain only a number, no trailing
-		newline
+		newline  
 bwlimit		if it exists, contents will be appended to --bwlimit=
 		Warning: the file should contain only a number, no trailing
-		newline.
+		newline.  
 timeout		Tell rsync to exit if no data is transferred for this many
 		seconds (--timeout). No trailing newline, just the number.
-		Defaults to 3600.
+		Defaults to 3600.  
 fsuuid		if it exists, its contents will be included in log messages and
 		the backup inventory. pre-client scripts are expected to
-		maintain it.
+		maintain it.  
 snapuuid	if it exists, its contents will be included in log messages and
 		the backup inventory. pre-client scripts are expected to
-		maintain it.
+		maintain it.  
 fstype		if it exists, its contents will be included in log messages and
 		the backup inventory. pre-client scripts are expected to
-		maintain it.
+		maintain it.  
 
 Other specific rsync options may be supported explicitly in future versions.
 
@@ -159,15 +158,19 @@ A mechanism is provided to make this easier/more efficient.
 In /etc/zfsbackup/client-defaults, you can create defaults for the following
 files:
 
+```
 username password exclude include files filter options check pre-client
 post-client no-sparse no-xattrs no-acls no-hard-links no-delete no-partial
 no-xdev no-inplace compress compress-level bwlimit timeout
+```
 
 Additionally, a zfsbackup-create-source script is provided that creates a new
 sources.d directory. It hardlinks the above files into the new sources.d dir,
 with the expection of:
 
+```
 exclude include files filter check pre-client post-client options
+```
 
 These files, if they exist in /etc/zfsbackup/client-defaults, will be copied
 into the new sources.d dir, not hardlinked. Existing files will not be
@@ -183,58 +186,58 @@ zfsbackup-create-source takes the following arguments (which are evaluated in
 the below order):
 
 -p, --path	Path to the directory to be backed up. If not specified,
-		a path symlink will not be created.
+		a path symlink will not be created.  
 -r, --pre[@]	Pre-client script to run. Will be copied into the sources.d
 		dir unless --pre@ is used, in which case a symlink will be
-		created.
--o, --post[@]	Post-client script; see --pre for details.
--c, --check[@]	Check script; see --pre for details.
+		created.  
+-o, --post[@]	Post-client script; see --pre for details.  
+-c, --check[@]	Check script; see --pre for details.  
 -b, --bind	Use shipped pre-bindmount and post-bindmount script as
 		pre-client and post-client script, respectively.
 		These will bind mount the source fs to a temporary directory
 		and upload that, then unmount the directory. Useful if you
-		want to copy files that may be under mountpoints.
+		want to copy files that may be under mountpoints.  
 -z, --zsnap	The path specified in --path refers to a zfs dataset that will
 		have been mounted when the backup is performed. Use a
 		pre-client script that sets the path to the latest snapshot of
-		this zfs dataset and mounts it (via .zfs/snapshot).
--s, --snap	NOT IMPLEMENTED. Reserved for LVM snapshot support.
+		this zfs dataset and mounts it (via .zfs/snapshot).  
+-s, --snap	NOT IMPLEMENTED. Reserved for LVM snapshot support.  
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
-		based on --path (so one of the two must be specified).
--u, --username	Override remote username.
--e, --exclude	Override exclude file.
--i, --include	Override include file.
---files		Override "files" file (for --files-from).
--f, --filter	Override filter file.
---no-sparse	Create no-sparse flag file.
--S, --sparse	Remove no-sparse flag file.
---no-xattrs	Create no-xattrs flag file.
--X, --xattrs	Remove no-xattrs flag file.
---no-acls	Create no-acls flag file.
--A, --acls	Remove no-acls flag file.
---no-hard-links Create no-hard-links flag file.
--H, --hard-links Remove no-hard-links flag file.
---no-delete	Create no-delete flag file.
---delete	Remove no-delete flag file.
---no-partial	Create no-partial flag file.
--P, --partial	Remove no-partial flag file.
---no-xdev	Create no-xdev flag file.
--x, --xdev	Remove no-xdev flag file.
---no-inplace	Create no-inplace flag file.
---inplace	Remove no-inplace flag file.
---compress	Create compress flag file.
---no-compress	Remove compress flag file.
---compress-level Override compress level.
---bwlimit	Override bwlimit.
---url		Provide specific URL to back up to.
+		based on --path (so one of the two must be specified).  
+-u, --username	Override remote username.  
+-e, --exclude	Override exclude file.  
+-i, --include	Override include file.  
+--files		Override "files" file (for --files-from).  
+-f, --filter	Override filter file.  
+--no-sparse	Create no-sparse flag file.  
+-S, --sparse	Remove no-sparse flag file.  
+--no-xattrs	Create no-xattrs flag file.  
+-X, --xattrs	Remove no-xattrs flag file.  
+--no-acls	Create no-acls flag file.  
+-A, --acls	Remove no-acls flag file.  
+--no-hard-links Create no-hard-links flag file.  
+-H, --hard-links Remove no-hard-links flag file.  
+--no-delete	Create no-delete flag file.  
+--delete	Remove no-delete flag file.  
+--no-partial	Create no-partial flag file.  
+-P, --partial	Remove no-partial flag file.  
+--no-xdev	Create no-xdev flag file.  
+-x, --xdev	Remove no-xdev flag file.  
+--no-inplace	Create no-inplace flag file.  
+--inplace	Remove no-inplace flag file.  
+--compress	Create compress flag file.  
+--no-compress	Remove compress flag file.  
+--compress-level Override compress level.  
+--bwlimit	Override bwlimit.  
+--url		Provide specific URL to back up to.  
 
 If /etc/zfsbackup/mksource.d exists, the scripts in it will be run with
 run-parts(8). The scripts will be passed the following environment variables:
 
-zbSOURCENAME	Absolute path to new sources.d directory.
-zbURL		URL being backed up to, if available.
-zbPATH		path as specified on the zfsbackup-create-source command line.
-zbUSERNAME	username that will be used for uploads.
+zbSOURCENAME	Absolute path to new sources.d directory.  
+zbURL		URL being backed up to, if available.  
+zbPATH		path as specified on the zfsbackup-create-source command line.  
+zbUSERNAME	username that will be used for uploads.  
 
 Such scripts can be used to output commands that will create the necessary zfs
 instance and rsyncd.conf entries on the backup server (or even run them via
@@ -284,7 +287,9 @@ The backup inventory has to have the following properties:
 
 Possible record structure:
 
+```
 timestamp success/failure sources.d-entry originuuid snapshotuuid destination-url fstype preclientstatus postclientstatus starttime
+```
 
 In addition to appending records to the inventory, the following tools
 should be written:
@@ -302,9 +307,11 @@ should be written:
 ### Client side zfs properties
 
 While these are not used by the scripts in any way, I set the following
-properties on client filesystems as a matter of convention:
+property on client filesystems as a matter of convention:
 
- * korn.zfsbackup:config
+```
+korn.zfsbackup:config
+```
 
   This can be either /path/to/source.d/dir (several dirs may be specified,
 with colons between them) or "none". In the former case, this lists the
@@ -315,7 +322,9 @@ on all filesystems that don't need to be backed up; so whenever it is
 inherited I can see that something that should get backed up is not. A list
 of suspcious filesystems can be obtained with
 
-  zfs get -t filesystem,volume -s inherited korn.zfsbackup:config
+```
+zfs get -t filesystem,volume -s inherited korn.zfsbackup:config
+```
 
 TODO: for clients that use mostly zfs, much of the configuration could in
 fact reside in zfs properties. I should give this some thought.
@@ -365,9 +374,9 @@ korn.zfsbackup:minsize
 	If the dataset's reported size (in bytes) is smaller than this, the
 	backup is considered partial and korn.zfsbackup:partial is set to
 	true on the snapshot. The default is 262144 (256k); set to 0 to
-	disable. Future versions may support human-readable sizes.
+	disable. Future versions may support human-readable sizes.  
 
-korn.zfsbackup:mininodes
+korn.zfsbackup:mininodes  
 	If the number of inodes used by the dataset (as reported by df -i)
 	is smaller than this, the backup is considered partial; see above.
 	The default is 7 (6 inodes are in use in an empty zfs dataset). Set
@@ -379,71 +388,71 @@ korn.zfsbackup:mininodes
 
 	Future versions may support checking how big the difference between
 	the current upload and the last snapshot is; that may be a more
-	useful heuristic.
+	useful heuristic.  
 
-korn.zfsbackup:expire-default
+korn.zfsbackup:expire-default  
 	If set, has to be a string date(1) understands. The expiry date of
 	the snapshot will be set by this property instead of the internal
 	heuristics. The /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME overrides
-	this value.
+	this value.  
 
-korn.zfsbackup:expire-rule
+korn.zfsbackup:expire-rule  
 	Can currently be the absolute path to a script that will output the
 	date of expiry (instead of /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME).
-	Future versions may support dirvish-like expire rules.
+	Future versions may support dirvish-like expire rules.  
 
-korn.zfsbackup:index
+korn.zfsbackup:index  
 	* NOT IMPLEMENTED YET *
 	Once implemented, will cause an index of the dataset to be generated
 	and saved in its root directory before the snapshot is taken. The
 	property should be set to the name of the index file. If it ends in
 	.gz, it will be gzipped; if it ends in .bz2, it will be compressed
-	using bzip2.
+	using bzip2.  
 
-korn.zfsbackup:image-default
+korn.zfsbackup:image-default  
 	A string parseable by date(1) that will be used to set the name of
 	the snapshot. Defaults to zfsbackup-NAMEPREFIX-%Y-%m-%d-%H%M, where
 	nameprefix is yearly, monthly, weekly-isoweekyear-week, daily or
 	extra and is set either by the overridable expire_rule() shell
 	function or by running "/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME
 	nameprefix" if the script exists. The string NAMEPREFIX will be
-	replaced by the current value of $nameprefix.
+	replaced by the current value of $nameprefix.  
 
-korn.zfsbackup:min-successful
+korn.zfsbackup:min-successful  
 	* NOT IMPLEMENTED YET *
 	The minimum number of successful backups that must exist for one to
-	be expired. Will default to 2 (leaving 1 after the expiry).
+	be expired. Will default to 2 (leaving 1 after the expiry).  
 
 ### Snapshot properties
 
 The following properties are set on snapshots:
 
-korn.zfsbackup:partial
+korn.zfsbackup:partial  
 	Set to true if the backup doesn't appear to contain enough files, or
-	be big enough, to be complete. See origin properties.
+	be big enough, to be complete. See origin properties.  
 
-korn.zfsbackup:successful
+korn.zfsbackup:successful  
 	Set to true if partial is not true AND $RSYNC_EXIT_STATUS is 0. Set
-	to false otherwise.
+	to false otherwise.  
 
-korn.zfsbackup:rsync_exit_status
-	Set to $RSYNC_EXIT_STATUS (passed from rsyncd).
+korn.zfsbackup:rsync_exit_status  
+	Set to $RSYNC_EXIT_STATUS (passed from rsyncd).  
 
-korn.zfsbackup:rsync_host_addr
-	Set to $RSYNC_HOST_ADDR (passed from rsyncd).
+korn.zfsbackup:rsync_host_addr  
+	Set to $RSYNC_HOST_ADDR (passed from rsyncd).  
 
-korn.zfsbackup:rsync_host_name
-	Set to $RSYNC_HOST_NAME (passed from rsyncd).
+korn.zfsbackup:rsync_host_name  
+	Set to $RSYNC_HOST_NAME (passed from rsyncd).  
 
-korn.zfsbackup:rsync_user_name
-	Set to $RSYNC_USER_NAME (passed from rsyncd).
+korn.zfsbackup:rsync_user_name  
+	Set to $RSYNC_USER_NAME (passed from rsyncd).  
 
-korn.zfsbackup:expires
-	Set to the expiry date (in epoch seconds).
+korn.zfsbackup:expires  
+	Set to the expiry date (in epoch seconds).  
 
-korn.zfsbackup:expires-readable
+korn.zfsbackup:expires-readable  
 	Set to the expiry date in human readable form. The format is
-	currently hardcoded: "%Y%m%d %H:%M:%S".
+	currently hardcoded: "%Y%m%d %H:%M:%S".  
 
 ## Limitations
 
