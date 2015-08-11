@@ -106,6 +106,10 @@ while [[ $flag_fail = 1 ]]; do
 			else
 				sleep $[RANDOM%29+1]
 				[[ "$VERBOSE" = 0 ]] || echo "Retrying $source." >&2
+				[[ -f "$source/stderr" ]] && {
+					echo "stderr output from last $source run:" >&2
+					cat "$source/stderr" >&2
+				}
 				zfsbackup-client "$source"
 			fi
 		done
