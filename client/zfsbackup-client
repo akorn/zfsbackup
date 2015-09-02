@@ -134,6 +134,8 @@ for source in $(get_sources $*); do
 					rsync_exit=111
 				fi
 			fi
+		else
+			echo "$preclient_exit" >"$source/stamp-failure"
 		fi
 		cd "$source"
 		if [[ -x post-client ]]; then
