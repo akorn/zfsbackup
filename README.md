@@ -245,6 +245,14 @@ ssh).
 
 Some examples are provided.
 
+TODO: support creating several sources.d directories, pertaining to
+different backup servers, simultaneously. Ideally it'd be possible to
+enumerate backup servers somewhere and then refer to them by some tag or
+number; zfsbackup-create-source should include the tag of the server in the
+sources.d directory it creates (or maybe there should be a separate
+hierarchy, one per tag). The backups to the different servers should be
+scheduled independently.
+
 ### Backup inventory
 
 It is desirable for the client to keep logs of which source was backed up
@@ -313,11 +321,11 @@ property on client filesystems as a matter of convention:
 korn.zfsbackup:config
 ```
 
-  This can be either /path/to/source.d/dir (several dirs may be specified,
+This can be either /path/to/source.d/dir (several dirs may be specified,
 with colons between them) or "none". In the former case, this lists the
 zfsbackup source.d style directories that cause this fs to be backed up.
 
-  "none" means that this fs is not backed up. I set this property explicitly
+"none" means that this fs is not backed up. I set this property explicitly
 on all filesystems that don't need to be backed up; so whenever it is
 inherited I can see that something that should get backed up is not. A list
 of suspcious filesystems can be obtained with
@@ -325,6 +333,10 @@ of suspcious filesystems can be obtained with
 ```
 zfs get -t filesystem,volume -s inherited korn.zfsbackup:config
 ```
+
+If the same fs is being backed up to several destinations, multiple config
+locations can be given by setting korn.zfsbackup:config:tag0,
+korn.zfsbackup:config:tag1 etc.
 
 TODO: for clients that use mostly zfs, much of the configuration could in
 fact reside in zfs properties. I should give this some thought.
@@ -342,15 +354,16 @@ in rsyncd.conf. This script runs
 /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME if it exists. The script will be
 passed the word "expires" as the first and only argument. This script is
 expected to output a date in unix epoch seconds (date +%s). The snapshot
-will be kept until this time and an at job scheduled to remove it if at(1)
-is available. The snapshot will have its korn.zfsbackup:expires property set
-to the expiry date. If no /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME script
-is provided, internal defaults are used (heuristics based on day of week,
-day of month, day of year). These can be overridden in
+will be kept until this time and an at(1) job scheduled to remove it if
+at(1) is available. The snapshot will have its korn.zfsbackup:expires
+property set to the expiry date. If no
+/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME script is provided, internal
+defaults are used (heuristics based on day of week, day of month, day of
+year). These can be overridden in
 /etc/zfsbackup/server.conf. Expiry can be set to "never" to never expire a
 snapshot.
 
-Because the at job may not be run (for example, if the server is off), the
+Because the `at` job may not be run (for example, if the server is off), the
 cronjob zfsbackup-expire-snapshots is provided. It looks for zfs snapshots
 that have the korn.zfsbackup:expires property and removes any that are
 expired. Future versions may support scoping (only expire snapshots under a
