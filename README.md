@@ -1,9 +1,9 @@
 # zfsbackup
 
 This is a collection of scripts that together form a solution to make
-backups to a zfs server that runs rsyncd. The idea is to have one rsync
-module per source filesystem; each of these modules is rooted in a zfs
-dataset.
+backups to one or more zfs servers that run rsyncd. The idea is to have
+one rsync module per source filesystem; each of these modules is rooted
+in a zfs dataset.
 
 After a backup run is completed, a snapshot is made of the zfs dataset
 (triggered from rsyncd.conf, via "post-xfer exec").
@@ -15,76 +15,42 @@ Expiry information is stored in an attribute of the snapshot.
 The client subdir of the current directory contains the script that runs on
 the client side, called zfsbackup-client.
 
-It first reads defaults from /etc/zfsbackup/client.conf, then iterates over
-the directories in /etc/zfsbackup/sources.d, each of which can contain the
-following files and directories:
+In the simplest case where you only have one backup server, it first reads
+defaults from /etc/zfsbackup/client.conf, then iterates over the directories
+in /etc/zfsbackup/sources.d, each of which can contain the following files
+and directories:
 
-url		rsync URL to upload to (single line; subsequent lines are ignored)  
-username	username to send to rsyncd  
-password	password to send to rsyncd  
-stdout		if exists, stdout will be redirected into it; could be a
-		symlink or a fifo  
-		Later versions may check if it's executable and if it is, run
-		it and pipe stdout into it that way.  
-stderr		like above, but for standard error  
-exclude		will be passed to rsync using exclude-from  
-include		will be passed to rsync using include-from  
-files		will be passed to rsync using files-from  
-filter		will be passed to rsync using --filter (one per line)  
-options		further options to pass to rsync, one per line
-		The last line should not have a trailing newline.  
-path		if it's a symlink to a directory, the directory to copy;
-		if it's a file or a symlink to a file, the first line is
-		taken to be the name of the directory to copy.  
-check		a script to run before doing anything else; decides whether
-		to upload this directory at this time or not. Upload only
-		proceeds if ./check exits successfully. Not even pre-client
-		is run otherwise.  
-pre-client	a script to run on the client before copying begins;
-		if it returns unsuccessfully, rsync is not started,
-		but post-client is still run.
-		The supplied client/set-path-to-latest-zfs-snapshot script
-		can be used to find the latest existing snapshot of a given
-		zfs dataset and make the path symlink point to it (in
-		.zfs/snapshot).  
-pre-client.d/	a directory that will be passed to run-parts (after
-		pre-client has been run, if it exists).  
-post-client	a script to run on the client after copying finished.
-		Its first argument is the exit status of pre-client; the 2nd
-		argument is the exit status of rsync (provided it was run).  
-post-client.d/	a directory that will be passed to run-parts (after
-		post-client has been run, if it exists).  
-no-sparse	if it exists, -S will not be passed to rsync (but "options"
-		can override). -S is the default if no-inplace exists.
-		(rsync doesn't support inplace and sparse simultaneously.)  
-no-xattrs	like no-sparse, but for -X  
-no-acls		like no-sparse, but for -A  
-no-hard-links	like no-sparse, but for -H  
-no-delete	like no-sparse, but for --delete  
-no-partial	like no-sparse, but for --partial  
-no-xdev		like no-sparse, but for -x (the default is to *not* cross
-		filesystems)  
-no-inplace	like no-sparse, but for --inplace (in-place updates are more
-		space efficient with zfs snapshots unless dedup is also used)  
-compress	if it exists, rsync will be called with -z  
-compress-level	if it exists, contents will be appended to --compress-level=
-		Warning: the file should contain only a number, no trailing
-		newline  
-bwlimit		if it exists, contents will be appended to --bwlimit=
-		Warning: the file should contain only a number, no trailing
-		newline.  
-timeout		Tell rsync to exit if no data is transferred for this many
-		seconds (--timeout). No trailing newline, just the number.
-		Defaults to 3600.  
-fsuuid		if it exists, its contents will be included in log messages and
-		the backup inventory. pre-client scripts are expected to
-		maintain it.  
-snapuuid	if it exists, its contents will be included in log messages and
-		the backup inventory. pre-client scripts are expected to
-		maintain it.  
-fstype		if it exists, its contents will be included in log messages and
-		the backup inventory. pre-client scripts are expected to
-		maintain it.  
+ * `url` -- rsync URL to upload to (single line; subsequent lines are ignored)
+ * `username` -- username to send to rsyncd
+ * `password` -- password to send to rsyncd
+ * `stdout` -- if exists, stdout will be redirected into it; could be a symlink or a fifo. Later versions may check if it's executable and if it is, run it and pipe stdout into it that way (TODO).
+ * `stderr` -- like above, but for standard error.
+ * `exclude` -- will be passed to `rsync` using `--exclude-from`
+ * `include` -- will be passed to `rsync` using `--include-from`
+ * `files` -- will be passed to `rsync` using `--files-from`
+ * `filter` -- will be passed to `rsync` using `--filter` (one per line)
+ * `options` -- further options to pass to `rsync`, one per line. The last line should not have a trailing newline.
+ * `path` -- if it's a symlink to a directory, the directory to copy (back up); if it's a file or a symlink to a file, the first line is taken to be the name of the directory to copy. If it's neither, the results are undefined.
+ * `check` -- a script to run before doing anything else; decides whether to upload this directory at this time or not. Upload only proceeds if ./check exits successfully. Not even pre-client is run otherwise.
+ * `pre-client` -- a script to run on the client before copying begins; if it returns unsuccessfully, `rsync` is not started, but `post-client` is still run. The supplied `client/set-path-to-latest-zfs-snapshot` script can be used as a `pre-client` script to find the latest existing snapshot of a given zfs dataset and make the path symlink point to it (in `.zfs/snapshot`).
+ * `pre-client.d/` -- a directory that will be passed to `run-parts` (after `pre-client` has been run, if it exists).
+ * `post-client` -- a script to run on the client after copying finished (or immediately after `pre-client`, if `pre-client` fails). Its first argument is the exit status of `pre-client`; the 2nd argument is the exit status of `rsync` (provided it was run).
+ * `post-client.d/` -- a directory that will be passed to run-parts (after post-client has been run, if it exists). The scripts in this directory will receive the same arguments as `post-client`.
+ * `no-sparse` -- if it exists, `-S` will not be passed to `rsync` (except if it occurs in `options`). `-S` is the default if `no-inplace` exists (rsync doesn't support inplace and sparse simultaneously.) 
+ * `no-xattrs` -- if it exists, `-X` will not be passed to `rsync` (except if it occurs in `options`). The default is to copy xattrs.
+ * `no-acls` -- if it exists, `-A` will not be passed to `rsync` (except if it occurs in `options`). The default is to copy POSIX ACLs.
+ * `no-hard-links` -- if it exists, `-H` will not be passed to `rsync` (except if it occurs in `options`). The default is to reproduce hardlinks.
+ * `no-delete` -- if it exists, `--delete` will not be passed to `rsync` (except if it occurs in `options`). The default is to delete remote files that are no longer present locally; however, you need to pass `--delete-excluded` explicitly via `options` for now.
+ * `no-partial` -- if it exists, `--partial` will not be passed to `rsync` (except if it occurs in `options`). The default is to use partial transfers.
+ * `no-xdev` -- if it exists, `-x` will not be passed to `rsync` (except if it occurs in `options`). The default is *not* to cross mountpoint boundaries.
+ * `no-inplace` -- if it exists, `--inplace` will not be passed to `rsync` (except if it occurs in `options`). In-place updates are probably more space efficient with zfs snapshots unless dedup is also used, and thus are turned on by default.
+ * `compress` -- if it exists, rsync will be called with `-z`. The default is not to use compression in rsync.
+ * `compress-level` -- if it exists, contents will be appended to `--compress-level=`. The file should contain only a number, no trailing newline.
+ * `bwlimit` -- if it exists, contents will be appended to `--bwlimit=`. The file should contain only a number, no trailing newline.
+ * `timeout` -- Tell rsync to exit if no data is transferred for this many seconds (`--timeout`). No trailing newline, just the number. Defaults to 3600.
+ * `fsuuid` -- if it exists, its contents will be included in log messages and the backup inventory. Currently not very useful.
+ * `snapuuid` -- if it exists, its contents will be included in log messages and the backup inventory. pre-client scripts are expected to update this file. Currently not very useful.
+ * `fstype` -- if it exists, its contents will be included in log messages and the backup inventory. Currently not very useful.
 
 Other specific rsync options may be supported explicitly in future versions.
 
@@ -92,14 +58,13 @@ You may place other files in sources.d directories (needed by custom pre- or
 post-client scripts, for example).
 
 The defaults try to accommodate expected usage so that as little
-configuration is necessary as possible.
+configuration as possible is necessary.
 
-Note that it's possible to upload the same source directory to several
-servers; just create separate sources.d directories for each remote
-instance. Future versions may provide a different mechanism for this; e.g.
-subdirs under each sources.d directory.
+Note that even in this simple setup it's possible to upload the same source
+directory to several servers; just create separate sources.d directories for
+each remote instance.
 
-check, pre-client and post-client are started with the current working
+`check`, `pre-client` and `post-client` are started with the current working
 directory set to the sources.d directory being processed.
 
 Currently, sources.d directories are processed sequentially, in unspecified
@@ -120,10 +85,12 @@ The accumulation is currently not capped, so I suppose it can overflow.
 
 ### client.conf
 
-The client.conf file can currently contain the following settings (with
+The `client.conf` file can currently contain the following settings (with
 their current defaults):
 
-```
+#### single-server case
+
+```zsh
 # Path to sources.d directory:
 SOURCES=/etc/zfsbackup/sources.d
 # Path to scripts shipped with zfsbackup:
@@ -141,22 +108,63 @@ CREATEREMOTEZFS=0
 # by default (increases performance by avoiding costly xattr operations;
 # decreases security):
 FAKESUPER=true
+# Where to create mountpoints for, and mount, directories to backup if we're using
+# bind mounts to back them up including stuff hidden under mountpoints. This setting
+# is used at zfs-create-source time.
+BINDROOT=/mnt
 # You might want to use something like:
 #coproc logger
 #exec >&p
 #exec 2>&p
 ```
 
+#### multi-server case
+
+```zsh
+# if a server tag is set via the command line, $BACKUPSERVER will contain it,
+# so that the client.conf file can reference it:
+#
+# Path to sources.d directories:
+SOURCES=/etc/zfsbackup/sources.d/$BACKUPSERVER
+# Path to scripts shipped with zfsbackup:
+SCRIPTS=/usr/local/share/zfsbackup
+# Path to default settings for new sources.d directories:
+DEFAULTDIR=/etc/zfsbackup/client-defaults/$BACKUPSERVER
+# Path to directory with script to run after zfsbackup-create-source:
+MKSOURCE_D=/etc/zfsbackup/mksource.d
+# Used by mksource.d/create-remote-zfs:
+REMOTEBACKUPPOOL=backup
+REMOTEBACKUPPATH="$(hostname)"
+# Whether to attempt to create remote zfs instance via ssh to hostname portion of url:
+CREATEREMOTEZFS=0
+# Set this to false to disable global fake super setting on per-module basis
+# by default (increases performance by avoiding costly xattr operations;
+# decreases security):
+FAKESUPER=true
+# Where to create mountpoints for, and mount, directories to backup if we're using
+# bind mounts to back them up including stuff hidden under mountpoints. This setting
+# is used at zfs-create-source time.
+BINDROOT=/mnt
+# You might want to use something like:
+#. /etc/zfsbackup/client.conf.$BACKUPSERVER
+# to override some of the above on a per-server basis; and
+#coproc logger
+#exec >&p
+#exec 2>&p
+# to log via a pipe to an external program, such as logger(1)
+```
+
 ### Mass creation of sources.d directories
 
-In reality you'll want one sources.d directory for every filesystem you have,
-and in many cases these will be backed up using the same username and password
-and to the same server, but to a different rsync module.
+In reality you'll want one sources.d directory for every filesystem you have
+(per backupserver), and in many cases these will be backed up using the same
+username and password and to the same server(s), but to a different rsync
+module.
 
 A mechanism is provided to make this easier/more efficient.
 
-In /etc/zfsbackup/client-defaults, you can create defaults for the following
-files:
+In `/etc/zfsbackup/client-defaults[/$SERVER]`, you can create defaults for
+the following files:
 
 ```
 username password exclude include files filter options check pre-client
@@ -177,14 +185,19 @@ into the new sources.d dir, not hardlinked. Existing files will not be
 overwritten with defaults, but will be overwritten with values explicitly given
 on the command line.
 
-If /etc/zfsbackup/client-defaults contains a file called url-template, it will
-be used to generate the url file of the new sources.d dir as follows:
+If `/etc/zfsbackup/client-defaults[/$SERVER]` contains a file called
+`url-template`, it will be used to generate the url file of the new sources.d
+dir as follows:
 
-__PATH__ in the url-template will be replaced by the name of the sources.d dir.
+`__PATH__` in the url-template will be replaced by the basename of the sources.d
+directory.
 
-zfsbackup-create-source takes the following arguments (which are evaluated in
+`zfsbackup-create-source` takes the following arguments (which are evaluated in
 the below order):
 
+```
+--server	TODO Comma separated list of the names ("tags") of the
+		backup servers to use. See the HOWTO for details.
 -p, --path	Path to the directory to be backed up. If not specified,
 		a path symlink will not be created.  
 -r, --pre[@]	Pre-client script to run. Will be copied into the sources.d
@@ -201,7 +214,7 @@ the below order):
 		have been mounted when the backup is performed. Use a
 		pre-client script that sets the path to the latest snapshot of
 		this zfs dataset and mounts it (via .zfs/snapshot).  
--s, --snap	NOT IMPLEMENTED. Reserved for LVM snapshot support.  
+-s, --snap	NOT IMPLEMENTED, TODO. Reserved for LVM snapshot support.  
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).  
 -u, --username	Override remote username.  
@@ -230,8 +243,9 @@ the below order):
 --compress-level Override compress level.  
 --bwlimit	Override bwlimit.  
 --url		Provide specific URL to back up to.  
+```
 
-If /etc/zfsbackup/mksource.d exists, the scripts in it will be run with
+If `/etc/zfsbackup/mksource.d` exists, the scripts in it will be run with
 run-parts(8). The scripts will be passed the following environment variables:
 
 zbSOURCENAME	Absolute path to new sources.d directory.  
