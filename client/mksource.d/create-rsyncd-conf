@@ -1,11 +1,13 @@
 #!/bin/zsh
 
-REMOTEBACKUPPOOL=backup
-REMOTEBACKUPPATH="$(hostname)"
-REMOTE_APPEND_RSYNCD_CONF=0
-CLIENTNAME=$(hostname -f)
-FAKESUPER=true
+# defaults
+REMOTEBACKUPPOOL=backup         # first path component on remote server, e.g. /backup
+REMOTEBACKUPPATH="$(hostname)"  # 2nd path component on remote server, e.g. /backup/thishost
+REMOTE_APPEND_RSYNCD_CONF=false # if set to true, try to ssh to remote server and write to rsyncd.conf there
+CLIENTNAME=$(hostname -f)       # used to generate 'hosts allow = ' line in rsyncd.conf stanza
+FAKESUPER=true                  # whether to use xattrs on the server to store file attributes, by setting "fake super = yes"
 
+# we'll use these pretty colours to make copy-pasteable parts of the output easily distinguishable
 if autoload colors && colors 2>/dev/null ; then
 	BLUE="${fg_bold[blue]}"
 	RED="${fg_bold[red]}"
@@ -17,9 +19,11 @@ if autoload colors && colors 2>/dev/null ; then
 	NO_COLOR="${reset_color}"
 fi
 
+# override defaults using a configfile
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-if [[ "$FAKESUPER" = "false" ]]; then
+# disabling "fake super" involves explicitly setting uid and gid to 0
+if [[ "$FAKESUPER" = "false" ]] || [[ "$zbFAKESUPER" = "0" ]]; then
 	nofakesuper="fake super = false
 uid = 0
 gid = 0
@@ -56,11 +60,13 @@ EOF
 
 BACKUPSERVER="$(sed 's@rsync://@@;s@/.*@@' <"$zbSOURCENAME"/url)"
 BACKUPMODULE="$(cut -d/ -f4 <"$zbSOURCENAME"/url)"
-REMOTESUBDIR=${REMOTESUBDIR:-${${BACKUPMODULE#backup_}/_*}}
-REMOTERSYNCDCONF=${REMOTERSYNCDCONF:-/etc/rsyncd/conf.d/$REMOTESUBDIR/${BACKUPMODULE#backup_${REMOTESUBDIR}_}}
-if [[ "$REMOTE_APPEND_RSYNCD_CONF" = "1" ]]; then
+REMOTESUBDIR=${REMOTESUBDIR:-$(hostname)}
+REMOTERSYNCDCONF=${REMOTERSYNCDCONF:-/etc/rsyncd/conf.d/$REMOTESUBDIR/${zbSOURCENAME:t}}
+if [[ "$REMOTE_APPEND_RSYNCD_CONF" = "true" ]]; then
 	echo "Attempting to append an appropriate rsyncd.conf stanza to $REMOTERSYNCDCONF on $BACKUPSERVER..."
+	ssh "$BACKUPSERVER" mkdir -p ${REMOTERSYNCDCONF:h}
 	create_stanza | ssh "$BACKUPSERVER" cat \>\> $REMOTERSYNCDCONF
+	ssh "$BACKUPSERVER" sh -c "'cd /etc/rsyncd && make'"
 else
 	echo "Please append something like the following to $REMOTERSYNCDCONF on $BACKUPSERVER:"
 	echo "$YELLOW"

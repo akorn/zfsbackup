@@ -12,7 +12,26 @@ REMOTEBACKUPPATH="$(hostname)"
 # Could be e.g. /mnt/zfsbackup
 BINDROOT=/mnt
 
+err_USAGE=1
+err_CANTCREATEDIR=2
+err_NOTIMPLEMENTED=42
+err_INTERNAL=111
+
+# An array we'll put the names of the servers we're asked to back up to in.
+typeset -a backupservers BACKUPSERVERS
+
+# we source the config once here, to seed the backupservers array
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
+# copy config variable into internal one; BACKUPSERVERS will be overridden by
+# the config if we re-source it, which right now shouldn't be a problem, but
+# it's better to be safe than sorry.
+backupservers=($BACKUPSERVERS[@])
+[[ $#backupservers = 0 ]] && backupservers=("")	# ensure the for loop has at least one item to iterate over, even if it's empty
+
+# An array we'll accumulate zfs properties we get from the command line in.
+typeset -a zfsprops
+zfsprops=($DEFAULT_ZFS_PROPERTIES[@])
 
 function flagfile() {
 	local docreate="$1"
@@ -33,8 +52,8 @@ function construct_bind_path() {
 			zbBINDPATH="$BINDROOT$realpath"
 			;;
 		*)
-			echo "path must be absolute, but '$realpath' isn't. Bailing out."
-			exit 111
+			echo "construct_bind_path: path must be absolute for -b to work, but '$realpath' isn't. This is a bug." >&2
+			exit $err_INTERNAL
 			;;
 	esac
 }
@@ -44,12 +63,14 @@ cat <<EOF
 zfsbackup-create-source takes the following arguments (which are evaluated in
 the below order):
 
+--server	Comma and/or space separated list of the names ("tags") of the
+		backup servers to use.
 -p, --path	Path to the directory to be backed up. If not specified,
 		a path symlink will not be created.
--r, --pre[@]	Pre-client script to run. Will be copied into the sources.d
+--pre[@]	Pre-client script to run. Will be copied into the sources.d
 		dir unless --pre@ is used, in which case a symlink will be
 		created.
--o, --post[@]	Post-client script; see --pre for details.
+--post[@]	Post-client script; see --pre for details.
 -c, --check[@]	Check script; see --pre for details.
 -b, --bind	Use shipped pre-bindmount and post-bindmount script as
 		pre-client and post-client script, respectively.
@@ -90,6 +111,9 @@ the below order):
 --compress-level Override compress level.
 --bwlimit	Override bwlimit.
 --url		Provide specific URL to back up to.
+--fake-super	Explicitly sets zbFAKESUPER=1 and exports it for mksource.d
+--no-fake-super	Explicitly sets zbFAKESUPER=0 and exports it for mksource.d
+-o prop=val	Set zfs property "prop" to value "val" on remote zfs dataset we create.
 
 See the README file for details.
 EOF
@@ -108,132 +132,242 @@ while [[ -n "$1" ]]; do
 			;;
 		-s|--snap)
 			echo "$0: FATAL: Sorry, --snap is not yet implemented." >&2
-			exit 42
+			exit $err_NOTIMPLEMENTED
 			;;
-		-p|--path)		 shift;	zbPATH="$1";;
-		-r|--pre)		 shift;	zbPRECLIENT="$1";;
-		--pre@)			 shift;	zbLNPRECLIENT="$1";;
-		-o|--post)		 shift;	zbPOSTCLIENT="$1";;
-		--post@)		 shift;	zbLNPOSTCLIENT="$1";;
-		-c|--check)		 shift;	zbCHECK="$1";;
-		--check@)		 shift;	zbLNCHECK="$1";;
-		-d|--dir)		 shift;	zbSOURCENAME="$1";;
-		-u|--username)		 shift;	zbUSERNAME="$1";;
-		-e|--exclude)		 shift;	zbEXCLUDEFROM="$1";;
-		-i|--include)		 shift;	zbINCLUDEFROM="$1";;
-		--files)		 shift;	zbFILESFROM="$1";;
-		-f|--filter)		 shift;	zbFILTER="$1";;
-		--no-sparse) 			zbNOSPARSE="1";;
-		-S|--sparse) 			zbFORCESPARSE="1";;
-		--no-xattrs) 			zbNOXATTRS="1";;
-		-X|--xattrs) 			zbFORCEXATTRS="1";;
-		--no-acls) 			zbNOACLS="1";;
-		-A|--acls) 			zbFORCEACLS="1";;
-		--no-hard-links) 		zbNOHARDLINKS="1";;
-		-H|--hard-links) 		zbFORCEHARDLINKS="1";;
-		--delete) 			zbFORCEDELETE="1";;
-		--no-delete) 			zbNODELETE="1";;
-		--no-partial) 			zbNOPARTIAL="1";;
-		-P|--partial) 			zbFORCEPARTIAL="1";;
-		--no-xdev) 			zbNOXDEV="1";;
-		-x|--xdev) 			zbFORCEXDEV="1";;
-		--no-inplace) 			zbNOINPLACE="1";;
-		--inplace) 			zbFORCEINPLACE="1";;
-		--compress) 			zbCOMPRESS="1";;
-		--no-compress) 			zbNOCOMPRESS="1";;
+		--server)		shift;	backupservers=(${=1//,/ });;
+		-p|--path)		shift;	zbPATH="$1";;
+		--pre)			shift;	zbPRECLIENT="$1";;
+		--pre@)			shift;	zbLNPRECLIENT="$1";;
+		--post)			shift;	zbPOSTCLIENT="$1";;
+		--post@)		shift;	zbLNPOSTCLIENT="$1";;
+		-c|--check)		shift;	zbCHECK="$1";;
+		--check@)		shift;	zbLNCHECK="$1";;
+		-d|--dir)		shift;	zbSOURCENAME="$1";;
+		-u|--username)		shift;	zbUSERNAME="$1";;
+		-e|--exclude)		shift;	zbEXCLUDEFROM="$1";;
+		-i|--include)		shift;	zbINCLUDEFROM="$1";;
+		--files)		shift;	zbFILESFROM="$1";;
+		-f|--filter)		shift;	zbFILTER="$1";;
+		--no-sparse) 			zbNOSPARSE="1"; zbFORCESPARSE="0";;
+		-S|--sparse) 			zbFORCESPARSE="1"; zbNOSPARSE="0";;
+		--no-xattrs) 			zbNOXATTRS="1"; zbFORCEXATTRS="0";;
+		-X|--xattrs) 			zbFORCEXATTRS="1"; zbNOXATTRS="0";;
+		--no-acls) 			zbNOACLS="1"; zbFORCEACLS="0";;
+		-A|--acls) 			zbFORCEACLS="1"; zbNOACLS="0";;
+		--no-hard-links) 		zbNOHARDLINKS="1"; zbFORCEHARDLINKS="0";;
+		-H|--hard-links) 		zbFORCEHARDLINKS="1"; zbNOHARDLINKS="0";;
+		--delete) 			zbFORCEDELETE="1"; zbNODELETE="0";;
+		--no-delete) 			zbNODELETE="1"; zbFORCEDELETE="0";;
+		--no-partial) 			zbNOPARTIAL="1"; zbFORCEPARTIAL="0";;
+		-P|--partial) 			zbFORCEPARTIAL="1"; zbNOPARTIAL="0";;
+		--no-xdev) 			zbNOXDEV="1"; zbFORCEXDEV="0";;
+		-x|--xdev) 			zbFORCEXDEV="1"; zbNOXDEV="0";;
+		--no-inplace) 			zbNOINPLACE="1"; zbFORCEINPLACE="0";;
+		--inplace) 			zbFORCEINPLACE="1"; zbNOINPLACE="0";;
+		--compress) 			zbCOMPRESS="1"; zbNOCOMPRESS="0";;
+		--no-compress) 			zbNOCOMPRESS="1"; zbCOMPRESS="0";;
 		--compress-level)        shift;	zbCOMPRESSLEVEL="$1";;
 		--bwlimit)	         shift;	zbBWLIMIT="$1";;
 		--url)		         shift;	zbURL="$1";;
+		--fake-super)		export	zbFAKESUPER=1;;
+		--no-fake-super)	export	zbFAKESUPER=0;;
+		-o)			shift; zfsprops=($zfsprops[@] -o "$1");;
 	esac
 	shift
 done
 
-if [[ -z "$zbSOURCENAME" ]]; then
-	if [[ -z "$zbPATH" ]]; then
-		echo "Sorry, either --dir or --path must be specified." >&2
-		usage
-		exit 1
-	else
-		if [[ "$zbPATH_IS_ZFS" = 1 ]]; then
-			temppath=$zbPATH
+if [[ -z "$zbSOURCENAME" ]] && [[ -z "$zbPATH" ]]; then
+	echo "Sorry, either --dir or --path must be specified." >&2
+	usage
+	exit $err_USAGE
+fi
+
+if [[ $#backupservers -gt 1 ]] && [[ -n "$zbURL" ]]; then
+	echo "You specified --url and multiple backup servers. Multi-server support assumes that URLs will be auto-generated from templates. See README." >&2
+	exit $err_USAGE
+fi
+
+if [[ $#backupservers -gt 1 ]] && [[ "$zbSOURCENAME[1]" = / ]]; then
+	echo "You specified an absolute directory using -d, but multiple backup servers. This doesn't work; we need a separate sources.d directory for every {server,path} tuple." >&2
+	exit $err_USAGE
+fi
+
+if [[ "$zbPATH_IS_ZFS" = 1 ]] && [[ "$zbBIND" = 1 ]]; then
+	echo "-b and -z are mutually exclusive." >&2
+	exit $err_USAGE
+fi
+
+# the array contains at least one item (the empty string)
+for BACKUPSERVER in $backupservers[@]; do ( # we run this in a subshell because we keep modifying inherited variables, but each iteration should see them as they were after command line processing
+
+	# we have to source the config here so that $BACKUPSERVER
+	# can be expanded in it where needed
+	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
+	# the user didn't specify -d, so auto-generate zbSOURCENAME (this is the intended usage)
+	if [[ -z "$zbSOURCENAME" ]]; then
+		temppath=$zbPATH	# zbPATH must be set here, because we error out earlier if neither --dir nor --path is supplied
+		if [[ "$zbPATH_IS_ZFS" = 1 ]]; then	
+			# if we were given the name of a zfs dataset it shouldn't start with a slash
+			# TODO: make the generated source name identical whether we specified -z or not (by generating the source name from the mountpoint, not the zfs instance name)
+			# otoh, maybe this should be optional?
+			if [[ "$temppath[1]" = / ]]; then
+				# TODO: this should not be an error
+				echo "You seem to have specified -z with an absolute path for -p. Specify the name of the zfs dataset instead!" >&2
+				exit $err_USAGE
+			else
+				zbSOURCENAME="$SOURCES/${temppath//\//_}"	# replace remaining slashes with underscores
+			fi
 		else
-			temppath=${zbPATH/\/}
+			# we need to strip initial slashes to make the name of the source directory prettier
+			if [[ "$temppath[1]" = / ]]; then
+				while [[ "$temppath[1]" = / ]]; do
+					temppath="${temppath/\/}"
+				done
+			else
+				echo "The path given after -p is not absolute. This is not supported." >&2
+				exit $err_USAGE
+			fi
+			if [[ -z "$temppath" ]]; then
+				# if temppath is empty here, but zbPATH isn't, then it consisted only of slashes, so we're dealing with the rootfs
+				zbSOURCENAME="$SOURCES/rootfs"
+			else
+				zbSOURCENAME="$SOURCES/${temppath//\//_}"	# replace remaning slashes with underscores
+			fi
 		fi
-		zbSOURCENAME="$SOURCES/${temppath//\//_}"
+	# OK, the user is a control freak and specified -d; let's see if it's an absolute location:
+	elif ! [[ "$zbSOURCENAME[1]" = "/" ]]; then
+		# if not, prepend the path to $SOURCES (if yes, we use it verbatim)
+		zbSOURCENAME="$SOURCES/$zbSOURCENAME"
 	fi
-elif ! [[ "$zbSOURCENAME[1]" = "/" ]]; then
-	zbSOURCENAME="$SOURCES/$zbSOURCENAME"
-fi
-[[ -d "$zbSOURCENAME" ]] || mkdir -p "$zbSOURCENAME" || {
-	echo "FATAL: Couldn't create $zbSOURCENAME." >&2
-	exit 2
-}
-# At this point, zbSOURCENAME is an absolute path to a directory that exists.
 
-unset createdbyme
-typeset -A createdbyme
-for i in $HARDLINKFILES[@]; do
-	if [[ -e "$DEFAULTDIR/$i" ]] && ln "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence no -f
-		createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
+	if [[ -d "$zbSOURCENAME" ]]; then
+		read "response?Warning: $zbSOURCENAME already exists. Do you want me to populate it with new defaults from $DEFAULTDIR [y/n]? "
+		case "$response" in
+			[nN]*)
+				echo "Aborted." >&2
+				echo $err_USAGE
+				;;
+		esac
 	fi
-done
-
-for i in $COPYFILES[@]; do
-	if [[ -e "$DEFAULTDIR/$i" ]] && cp -an "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence -n
-		createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
+	
+	# perform a zbBIND related sanity check before creating $zbSOURCENAME if it doesn't exist
+	if [[ "$zbBIND" = 1 ]]; then
+		# determine/set zbPATH (path to back up)
+		if [[ -z "$zbPATH" ]]; then
+			if [[ -L "$zbSOURCENAME/realpath" ]]; then
+				if [[ -d "$zbSOURCENAME/realpath/." ]] || ! [[ -r "$zbSOURCENAME/realpath" ]]; then
+					# it's either a symlink to a directory or to a non-existing directory (we assume)
+					zbPATH="$(readlink "$zbSOURCENAME/realpath")"
+				else
+					# it's a symlink to a file
+					zbPATH="$(head -n 1 "$zbSOURCENAME/realpath")"
+				fi
+			else
+				# it's a file
+				zbPATH="$(head -n 1 "$zbSOURCENAME/realpath")"
+			fi
+		fi
+		if [[ -z "$zbPATH" ]]; then
+			echo "Could not determine path to back up, which is needed for -b; either specify --path, or make sure $zbSOURCENAME/realpath is a symlink to the directory you want backed up, or a file whose first line contains the path to the directory to be backed up." >&2
+			exit $err_USAGE
+		fi
 	fi
-done
+	# end zbBIND sanity check
 
-[[ -n "$zbURL" ]] && echo "$zbURL" >"$zbSOURCENAME"/url
-if [[ -z "$zbURL" ]] && [[ -r $DEFAULTDIR/url-template ]]; then
-	zbURL="$(sed "s/__PATH__/backup_${REMOTEBACKUPPATH}_${zbSOURCENAME:t}/g" <$DEFAULTDIR/url-template)"
-	unsetopt CLOBBER
-	echo "$zbURL" > "$zbSOURCENAME/url"
-	setopt CLOBBER
-fi
-if [[ -z "$zbURL" ]] && [[ -r "$zbSOURCENAME/url" ]]; then
-	zbURL="$(head -n 1 "$zbSOURCENAME/url")"	# We must set this for mksource.d scripts
-fi
+	# Now, if $zbSOURCENAME doesn't exist, we create it
+	[[ -d "$zbSOURCENAME" ]] || mkdir -p "$zbSOURCENAME" || {
+		echo "FATAL: Couldn't create $zbSOURCENAME." >&2
+		exit $err_CANTCREATEDIR
+	}
+	# At this point, zbSOURCENAME is an absolute path to a directory that exists.
+	# If it exists, the assumption is that we're supposed to re-initialize it with new defaults.
 
-if [[ "$zbBIND" = 1 ]]; then
-	construct_bind_path "$zbPATH"
-	[[ -n "$zbBINDPATH" ]] && ln -s "$zbBINDPATH" "$zbSOURCENAME"/path
-	[[ -n "$zbPATH" ]] && ln -s "$zbPATH" "$zbSOURCENAME"/realpath
-else
-	[[ -n "$zbPATH" ]] && ln -s "$zbPATH" "$zbSOURCENAME"/path
-fi
-[[ -n "$zbPRECLIENT" ]] && cp -a "$zbPRECLIENT" "$zbSOURCENAME"/pre-client
-[[ -n "$zbLNPRECLIENT" ]] && ln -sf "$zbLNPRECLIENT" "$zbSOURCENAME"/pre-client
-[[ -n "$zbPOSTCLIENT" ]] && cp -a "$zbPOSTCLIENT" "$zbSOURCENAME"/post-client
-[[ -n "$zbLNPOSTCLIENT" ]] && ln -sf "$zbLNPOSTCLIENT" "$zbSOURCENAME"/post-client
-[[ -n "$zbCHECK" ]] && cp -a "$zbCHECK" "$zbSOURCENAME"/check
-[[ -n "$zbLNCHECK" ]] && ln -sf "$zbLNCHECK" "$zbSOURCENAME"/check
-if [[ "$zbLNPRECLIENT" = "$SCRIPTS/client/set-path-to-latest-zfs-snapshot" ]]; then
-	if [[ -n "$zbPATH" ]]; then
-		echo "$zbPATH" > "$zbSOURCENAME/zfs-dataset"
+	if [[ "$zbPATH_IS_ZFS" = 1 ]]; then
+		if [[ -n "$zbPATH" ]]; then
+			echo "$zbPATH" > "$zbSOURCENAME/zfs-dataset"
+		elif ! [[ -r "$zbSOURCENAME/zfs-dataset" ]]; then
+			echo "Warning: --zsnap specified without --path. Results are undefined." >&2
+		else
+			zbPATH=$(<"$zbSOURCENAME/zfs-dataset")
+		fi
+	fi
+	
+	# we track what files we create, because command line options may request us to delete some of them afterwards
+	unset createdbyme
+	typeset -A createdbyme
+	for i in $HARDLINKFILES[@]; do
+		if [[ -e "$DEFAULTDIR/$i" ]] && ln "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence no -f
+			createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
+		fi
+	done
+
+	for i in $COPYFILES[@]; do
+		if [[ -e "$DEFAULTDIR/$i" ]] && cp -an "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence -n
+			createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
+		fi
+	done
+
+	# determine/set zbURL (destination URL for backups)
+	if [[ -n "$zbURL" ]]; then
+		echo "$zbURL" >"$zbSOURCENAME/url" # we were given a specific URL (not the intended usage, but supported; in this case, even overwrite existing url file)
+	elif [[ -r "$zbSOURCENAME/url" ]]; then
+		zbURL="$(head -n 1 "$zbSOURCENAME/url")"	# We must set this for mksource.d scripts
+	elif [[ -r $DEFAULTDIR/url-template ]]; then
+		zbURL="$(sed "s/__PATH__/backup_${REMOTEBACKUPPATH//\//_}_${zbSOURCENAME:t}/g" <$DEFAULTDIR/url-template)"
+		echo "$zbURL" >"$zbSOURCENAME/url"
 	else
-		echo "Warning: --zsnap specified without --path. Results are undefined." >&2
+		echo "Unable to determine backup URL; no $DEFAULTDIR/url-template, no --url and no $zbSOURCENAME/url provided." >&2
+		exit $err_USAGE
 	fi
-fi
-[[ -n "$zbUSERNAME" ]] && echo "$zbUSERNAME" >"$zbSOURCENAME"/username
-[[ -z "$zbUSERNAME" ]] && [[ -f "$zbSOURCENAME/username" ]] && zbUSERNAME="$(head -n 1 $zbSOURCENAME/username)"
-[[ -n "$zbEXCLUDEFROM" ]] && cp "$zbEXCLUDEFROM" "$zbSOURCENAME"/exclude
-[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
-[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
-[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
-flagfile "$zbNOSPARSE" "$zbFORCESPARSE" no-sparse
-flagfile "$zbNOXATTRS" "$zbFORCEXATTRS" no-xattrs
-flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
-flagfile "$zbNOHARDLINKS" "$zbFORCEHARDLINKS" no-hard-links
-flagfile "$zbNODELETE" "$zbFORCEDELETE" no-delete
-flagfile "$zbNOPARTIAL" "$zbFORCEPARTIAL" no-partial
-flagfile "$zbNOXDEV" "$zbFORCEXDEV" no-xdev
-flagfile "$zbNOINPLACE" "$zbFORCEINPLACE" no-inplace
-flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
-[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
-[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
-[[ -n "$zbBWLIMIT" ]] && echo "$zbBWLIMIT" >"$zbSOURENAME"/bwlimit
-if [[ -n "$MKSOURCE_D" ]] && [[ -d "$MKSOURCE_D/." ]]; then
-	export zbSOURCENAME zbURL zbPATH zbUSERNAME
-	run-parts -v -u $(umask) "$MKSOURCE_D"
-fi
+
+	if [[ "$zbBIND" = 1 ]]; then
+		construct_bind_path "$zbPATH"
+		# At this point, zbBINDPATH is set.
+		ln -ns "$zbBINDPATH" "$zbSOURCENAME"/path	# -n avoids creating symlink under path/, but may print a harmless error message if path exists already
+		ln -ns "$zbPATH" "$zbSOURCENAME"/realpath
+	else
+		[[ -n "$zbPATH" ]] && ln -ns "$zbPATH" "$zbSOURCENAME"/path
+	fi
+	
+	# since these were explicitly given by the user on the command line, they override whatever was there in the zbSOURCENAME dir before
+	[[ -n "$zbPRECLIENT" ]] && cp -a "$zbPRECLIENT" "$zbSOURCENAME"/pre-client
+	[[ -n "$zbLNPRECLIENT" ]] && ln -sf "$zbLNPRECLIENT" "$zbSOURCENAME"/pre-client
+	[[ -n "$zbPOSTCLIENT" ]] && cp -a "$zbPOSTCLIENT" "$zbSOURCENAME"/post-client
+	[[ -n "$zbLNPOSTCLIENT" ]] && ln -sf "$zbLNPOSTCLIENT" "$zbSOURCENAME"/post-client
+	[[ -n "$zbCHECK" ]] && cp -a "$zbCHECK" "$zbSOURCENAME"/check
+	[[ -n "$zbLNCHECK" ]] && ln -sf "$zbLNCHECK" "$zbSOURCENAME"/check
+	[[ -n "$zbUSERNAME" ]] && echo "$zbUSERNAME" >"$zbSOURCENAME"/username
+	[[ -z "$zbUSERNAME" ]] && [[ -f "$zbSOURCENAME/username" ]] && zbUSERNAME="$(head -n 1 $zbSOURCENAME/username)"
+	[[ -n "$zbEXCLUDEFROM" ]] && cp "$zbEXCLUDEFROM" "$zbSOURCENAME"/exclude
+	[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
+	[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
+	[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
+	flagfile "$zbNOSPARSE" "$zbFORCESPARSE" no-sparse
+	flagfile "$zbNOXATTRS" "$zbFORCEXATTRS" no-xattrs
+	flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
+	flagfile "$zbNOHARDLINKS" "$zbFORCEHARDLINKS" no-hard-links
+	flagfile "$zbNODELETE" "$zbFORCEDELETE" no-delete
+	flagfile "$zbNOPARTIAL" "$zbFORCEPARTIAL" no-partial
+	flagfile "$zbNOXDEV" "$zbFORCEXDEV" no-xdev
+	flagfile "$zbNOINPLACE" "$zbFORCEINPLACE" no-inplace
+	flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
+	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
+	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
+	[[ -n "$zbBWLIMIT" ]] && echo "$zbBWLIMIT" >"$zbSOURCENAME"/bwlimit
+
+	# this fugly hack is apparently the only way to export an array
+	if [[ -n "$zfsprops" ]]; then
+		for i in {1..$#zfsprops}; do
+			zbZFSPROPS="$zbZFSPROPS ${(q)zfsprops[$i]}"
+		done
+	else
+		unset $zbZFSPROPS
+	fi
+	if [[ -n "$MKSOURCE_D" ]] && [[ -d "$MKSOURCE_D/." ]]; then
+		export BACKUPSERVER zbFAKESUPER zbFORCEACLS zbFORCEXATTRS \
+			zbNOACLS zbNOXATTRS zbPATH zbPATH_IS_ZFS \
+			zbSOURCENAME zbURL zbUSERNAME zbZFSPROPS
+		run-parts -v -u $(umask) "$MKSOURCE_D"
+	fi
+) done # for BACKUPSERVER in $backupservers[@]; do

@@ -2,7 +2,7 @@
 #
 # usage: set-path-to-latest-zfs-snapshot zfs-dataset
 #
-# Only supports case where zfs-dataset is a mounted zfs instance.
+# Only supports case where zfs-dataset is a mounted zfs instance. TODO: support zvols
 
 #coproc logger -p daemon.notice -t set-path-to-latest-zfs-snapshot
 #exec >&p

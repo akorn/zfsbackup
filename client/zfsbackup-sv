@@ -27,7 +27,7 @@
 # by runit, causing zfsbackup-client to be run again, or it can be started
 # again by cron.)
 #
-# The script will sleep for a random amount of seconds [1;30] between retry
+# The script will sleep for a random amount of [1;30] seconds between retry
 # attempts.
 #
 # TODO: instead of retrying in a random order, retry in a LIFO order (retry
@@ -87,7 +87,7 @@ if [[ -n "$SLEEP_IF_NOT_UP_FOR_MORE_THAN" ]]; then
 	fi
 fi
 ZFSBACKUP_TIME=$EPOCHSECONDS
-zfsbackup-client
+zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]"
 cd $SOURCES || {
 	echo "FATAL: can't chdir to $SOURCES." >&2
 	error_exit
@@ -110,7 +110,7 @@ while [[ $flag_fail = 1 ]]; do
 					echo "stderr output from last $source run:" >&2
 					cat "$source/stderr" >&2
 				}
-				zfsbackup-client "$source"
+				zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]" "$source"
 			fi
 		done
 	else
