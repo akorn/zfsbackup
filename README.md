@@ -357,7 +357,7 @@ The variables can be set in `/etc/zfsbackup/client.conf` or in
 Using several differently named instances of the runit service you can easily run
 backups to different servers in parallel.
 
-1. Running it as a cron job
+##### Running it as a cron job
 
 The other cron-based option is to invoke the `zfsbackup-sv` script as a
 cronjob (make sure only one instance is running at any given time, or make
@@ -367,23 +367,23 @@ support other lockprogs welcome).
 
 While this should work, it is untested.
 
-2. Running it as a runit service (preferred)
+##### Running it as a runit service (preferred)
 
 Create /etc/default/zfsbackup-server1:
 
-{{{
+```zsh
 SOURCES=/etc/zfsbackup/sources.d/server1
 ZFSBACKUP_CLIENT_ARGS=(--server server1)
-}}}
+```
 
 Create /etc/default/zfsbackup-server2:
 
-{{{
+```zsh
 SOURCES=/etc/zfsbackup/sources.d/server2
 ZFSBACKUP_CLIENT_ARGS=(--server server2)
-}}}
+```
 
-Create /etc/sv/zfsbackup-{server1,server2}; symlink zfsbackup-sv to these
+Create `/etc/sv/zfsbackup-{server1,server2}`; symlink `zfsbackup-sv` to these
 directories under the name `run`; set up `svlogd`-based logging for them;
 then symlink them to `/service` (or whatever directory your `runsvdir` watches).
 
