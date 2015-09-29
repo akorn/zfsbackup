@@ -183,7 +183,9 @@ Or, if your `/var` is on zfs
 zfsbackup-create-source -z -p rpool/var -o korn.zfsbackup:minsize=$[30*1024*1024] -o korn.zfsbackup:mininodes=5000
 ```
 
-# You may want to exclude some stuff from being backed up, like this:
+You may want to exclude some stuff from being backed up, like this:
+
+```
 cat >/etc/zfsbackup/sources.d/var/exclude <<EOF
 /cache/apt/archives/*.deb
 /cache/apt/archives/partial/*
