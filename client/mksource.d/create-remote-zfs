@@ -18,14 +18,36 @@ fi
 
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-if [[ "$CREATEREMOTEZFS" = "1" ]]; then
-	BACKUPSERVER="$(sed 's@rsync://@@;s@/.*@@' <"$zbSOURCENAME"/url)"
-	echo "Attempting to run zfs create $REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t} on $BACKUPSERVER..."
-	ssh "$BACKUPSERVER" zfs create $REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}
-	ssh "$BACKUPSERVER" chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}'
-else
-	echo "Run the following command on your backup server to create the zfs instance we'll back $zbSOURCENAME up to:"
-	echo "$YELLOW"zfs create "$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}"
+[[ "$zbNOACLS" = "1" ]] && acltype="-o acltype=noacl"
+[[ "$zbNOXATTRS" = "1" ]] && xattrs="-o xattr=off"
+[[ "$zbFORCEXATTRS" = "1" ]] && xattrs="-o xattr=sa"
+[[ "$zbFORCEACLS" = "1" ]] && xattrs="-o xattr=sa" && acltype="-o acltype=posixacl"
+
+BACKUPSERVERNAME="$(sed 's@rsync://@@;s@/.*@@' <"$zbSOURCENAME"/url)"
+if [[ "$CREATEREMOTEZFS" = "true" ]]; then
+	if [[ -n "$BACKUPSERVERNAME" ]]; then
+		echo "Trying to run\n${YELLOW}ssh $BACKUPSERVERNAME zfs create -p ${=xattrs} ${=acltype} $zbZFSPROPS $REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}${NO_COLOR}"
+		if ssh "$BACKUPSERVERNAME" zfs create -p ${=xattrs} ${=acltype} $zbZFSPROPS $REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}; then
+			# zbFAKESUPER can be inherited from zfsbackup-create-source; if it is, it takes precedence over the client.conf setting (FAKESUPER)
+			if [[ "$zbFAKESUPER" = "1" ]] || { [[ -z "$zbFAKESUPER" ]] && [[ "$FAKESUPER" = "true" ]] }; then
+				ssh "$BACKUPSERVERNAME" chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}'
+			fi
+			exit
+		else
+			echo "WARNING: creating remote fs failed." >&2
+		fi # if the ssh command didn't succeed, we'll print the instructions to create the remote fs manually, below
+	else
+		echo "ERROR: I'm supposed to create the remote zfs dataset but I'm unable to figure out the hostname of your backup server." >&2
+	fi
+fi
+
+# Not reached if fs created on remote server via ssh.
+echo "Run the following command on ${BACKUPSERVERNAME:-your backup server} to create the zfs instance we'll back $zbSOURCENAME up to:"
+echo -n "$YELLOW"zfs create -p ${=xattrs} ${=acltype} $zbZFSPROPS "$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}"
+if [[ "$zbFAKESUPER" = "1" ]] || { [[ -z "$zbFAKESUPER" ]] && [[ "$FAKESUPER" = "true" ]] }; then
+	echo
 	echo "chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}' $NO_COLOR"
+else
+	echo "$NO_COLOR"
 fi
 echo
