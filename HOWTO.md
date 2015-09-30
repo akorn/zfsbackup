@@ -230,3 +230,58 @@ Obtain a list of (zfs) filesystems that don't have backups configured:
 ```
 zfs get -o name,property all -t filesystem,volume -s inherited | fgrep korn.zfsbackup:config | sed 's/[[:space:]]*korn.zfsbackup:config.*//'
 ```
+
+## Scheduling backups
+
+### Using `zfsbackup-sv` as a runit service
+
+We'll assume you have two backupservers, named `server1` and `server2`.
+
+```zsh
+mkdir -p /etc/sv/zfsbackup-{server1,server2}/log
+# put some svlogd based logging script in /etc/sv/zfsbackup-{server1,server2}/log/run and make it executable
+for sv in /etc/sv/zfsbackup-{server1,server2}; do
+	ln -s /path/to/zfsbackup-sv $sv/run
+done
+```
+
+Now let's configure these services before we enable them:
+
+```zsh
+cat <<EOF >>/etc/zfsbackup/client.conf
+SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# seconds
+ONBOOT_SLEEP=12h			# sleep for this time after reboot before starting first backup
+EXIT_ACTION=sleep-and-exit		# can also be stop-service or just exit; see README.md
+VERBOSE=1				# setting to 0 suppresses informational messages to stderr
+MAX_RUNTIME=86400			# maximum number of seconds since zfsbackup-client run;
+# if we exceed this, the script aborts
+EOF
+```
+
+```zsh
+cat <<EOF >/etc/default/zfsbackup-server1
+# Either:
+# SOURCES=/etc/zfsbackup/sources.d/server1
+# or:
+BACKUPSERVER=server1
+EXIT_SLEEP_UNTIL=22:00			# if set, sleep until this time before exiting; this
+					# is when the next backup run (to this server) will start
+ZFSBACKUP_CLIENT_ARGS=(--server server1)
+EOF
+
+cat <<EOF >/etc/default/zfsbackup-server2
+# Either:
+# SOURCES=/etc/zfsbackup/sources.d/server2
+# or:
+BACKUPSERVER=server2
+EXIT_SLEEP_UNTIL=01:00			# if set, sleep until this time before exiting; this
+					# is when the next backup run (to this server) will start
+ZFSBACKUP_CLIENT_ARGS=(--server server2)
+EOF
+```
+
+Now let's enable the services:
+
+```zsh
+ln -s /etc/sv/zfsbackup-{server1,server2} /service/
+```
