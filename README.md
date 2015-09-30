@@ -354,8 +354,11 @@ It uses the following configuration variables:
 
 The variables can be set in `/etc/zfsbackup/client.conf` or in
 `/etc/default/name-of-runit-service` (e.g. `/etc/default/zfsbackup-server1`).
-Using several differently named instances of the runit service you can easily run
-backups to different servers in parallel.
+Using several differently named instances of the runit service you can easily
+run backups to different servers in parallel; this is the intended usage.
+
+The script doesn't support more than one sources.d hierarchy. The recommended
+multi-server setup is to run one instance of `zfsbackup-sv` for each server.
 
 ##### Running it as a cron job
 
