@@ -60,7 +60,7 @@ if [[ "$1" == "--server" ]]; then
 fi
 
 # the array contains at least one item (the empty string)
-for BACKUPSERVER in $backupservers[@]; do
+for BACKUPSERVER in "$backupservers[@]"; do
 
 	# we have to source the config here so that $BACKUPSERVER
 	# can be expanded in it where needed
