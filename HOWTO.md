@@ -266,7 +266,7 @@ cat <<EOF >/etc/default/zfsbackup-server1
 BACKUPSERVER=server1
 EXIT_SLEEP_UNTIL=22:00			# if set, sleep until this time before exiting; this
 					# is when the next backup run (to this server) will start
-ZFSBACKUP_CLIENT_ARGS=(--server server1)
+ZFSBACKUP_CLIENT_ARGS=(--server $BACKUPSERVER)
 EOF
 
 cat <<EOF >/etc/default/zfsbackup-server2
@@ -276,7 +276,7 @@ cat <<EOF >/etc/default/zfsbackup-server2
 BACKUPSERVER=server2
 EXIT_SLEEP_UNTIL=01:00			# if set, sleep until this time before exiting; this
 					# is when the next backup run (to this server) will start
-ZFSBACKUP_CLIENT_ARGS=(--server server2)
+ZFSBACKUP_CLIENT_ARGS=(--server $BACKUPSERVER)
 EOF
 ```
 
