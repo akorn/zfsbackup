@@ -143,7 +143,8 @@ minsize=$(zfs get -Hp -o value ${PROPPREFIX}:minsize "$origin")
 [[ "$minsize" = "-" ]] && minsize=$MINSIZE
 mininodes=$(zfs get -Hp -o value ${PROPPREFIX}:mininodes "$origin")
 [[ "$mininodes" = "-" ]] && mininodes=$MININODES
-sync # needed to make sure the usedbydataset value we're obtaining is final (?)
+#sync # needed to make sure the usedbydataset value we're obtaining is final (?)
+sleep 30 # instead of syncing, which is too hard on other processes -- a sync of this fs is bound to happen within 30s, right? right?
 actualsize="$(zfs get -Hp -o value usedbydataset "$origin")"
 df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
 if [[ "$minsize" -gt 0 ]]; then
@@ -179,7 +180,7 @@ properties=($properties -o ${PROPPREFIX}:expires="$expires")
 properties=($properties -o ${PROPPREFIX}:expires-readable="$expires_readable")
 
 echo "${0:t}[$RSYNC_PID]: transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) finished (exit status $RSYNC_EXIT_STATUS)." >&2
-echo "${0:t}[$RSYNC_PID}: Running zfs snapshot $properties[@] $snapname" >&2
+echo "${0:t}[$RSYNC_PID]: Running zfs snapshot $properties[@] $snapname" >&2
 zfs snapshot $properties[@] "$snapname" >&2
 
 if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
@@ -194,3 +195,4 @@ if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
 		fi
 	fi
 fi
+echo "${0:t}[$RSYNC_PID]: backup job completed." >&2
