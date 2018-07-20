@@ -47,6 +47,9 @@ EXIT_SLEEP_FIXED=18h	# if EXIT_SLEEP_UNTIL is unset, sleep this
 VERBOSE=1		# setting to 0 suppresses informational messages to stderr
 MAX_RUNTIME=86400	# maximum number of seconds since zfsbackup-client run;
 			# if we exceed this, the script aborts
+LOADWATCH_HIGH=100	# what system load level to suspend backup processes at
+LOADWATCH_LOW=10	# what system load level to resume suspended
+			# backup processes at
 SOURCES=/etc/zfsbackup/sources.d
 
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
@@ -81,13 +84,19 @@ if [[ -n "$SLEEP_IF_NOT_UP_FOR_MORE_THAN" ]]; then
 # /proc/uptime instead
 #	UP_FOR_SECS=$[EPOCHSECONDS-$(date --date "$(uptime -s)" '+%s')]
 	UP_FOR_SECS=$(cut -d' ' -f1 /proc/uptime)
-	if [[ "$UP_FOR_SECS" -le "$SLEEP_IF_NOT_UP_FOR_MORE_THAN" ]]; then
-		[[ "$VERBOSE" = 0 ]] || echo "It seems we booted recently (uptime is $UP_FOR_SECS seconds), sleeping $ONBOOT_SLEEP seconds." >&2
+	if [[ "$UP_FOR_SECS" -le "$SLEEP_IF_NOT_UP_FOR_MORE_THAN" ]] && [[ -n "$ONBOOT_SLEEP" ]]; then
+		[[ $ONBOOT_SLEEP[$#ONBOOT_SLEEP] =~ [[:digit:]] ]] && PRINT_ONBOOT_SLEEP="$ONBOOT_SLEEP seconds" || PRINT_ONBOOT_SLEEP="$ONBOOT_SLEEP"
+		[[ "$VERBOSE" = 0 ]] || echo "It seems we booted recently (uptime is $UP_FOR_SECS seconds), sleeping $PRINT_ONBOOT_SLEEP." >&2
 		sleep "$ONBOOT_SLEEP"
 	fi
 fi
 ZFSBACKUP_TIME=$EPOCHSECONDS
-zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]"
+if [[ -x /usr/bin/loadwatch ]] && [[ -n "$LOADWATCH_HIGH" ]] && [[ -n "$LOADWATCH_LOW" ]]; then
+	loadwatch=(loadwatch -h $LOADWATCH_HIGH -l $LOADWATCH_LOW --)
+else
+	unset loadwatch
+fi
+$loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]"
 cd $SOURCES || {
 	echo "FATAL: can't chdir to $SOURCES." >&2
 	error_exit

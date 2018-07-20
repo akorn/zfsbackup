@@ -50,8 +50,8 @@ backed up, and each of which can contain the following files and directories:
  * `compress-level` -- if it exists, contents will be appended to `--compress-level=`. The file should contain only a number, no trailing newline.
  * `bwlimit` -- if it exists, contents will be appended to `--bwlimit=`. The file should contain only a number, no trailing newline.
  * `timeout` -- Tell rsync to exit if no data is transferred for this many seconds (`--timeout`). No trailing newline, just the number. Defaults to 3600.
+ * `timelimit` -- Kill the rsync process after this many seconds. No enforced timeout if the file is not present. Depends on timeout(1) from coreutils.
  * `fsuuid` -- if it exists, its contents will be included in log messages and the backup inventory. Currently not very useful.
- * `snapuuid` -- if it exists, its contents will be included in log messages and the backup inventory. pre-client scripts are expected to update this file. Currently not very useful.
  * `fstype` -- if it exists, its contents will be included in log messages and the backup inventory. Currently not very useful.
 
 Other specific `rsync` options may be supported explicitly in future versions.
@@ -196,10 +196,10 @@ no-xdev no-inplace compress compress-level bwlimit timeout
 
 Additionally, a `zfsbackup-create-source` script is provided that creates a new
 sources.d directory. It hardlinks the above files into the new sources.d dir,
-with the expection of:
+with the exception of:
 
 ```
-exclude include files filter check pre-client post-client options
+exclude include files filter check pre-client post-client options stdout stderr
 ```
 
 These files, if they exist in /etc/zfsbackup/client-defaults, will be copied
@@ -412,8 +412,8 @@ The backup inventory has to have the following properties:
 
  * It has to reference the specific filesystem backed up, not just the name
    of the sources.d directory.
-   * Preferably by UUID.
-   * If a snapshot was used, the UUID of the origin fs should be listed; the UUID of the snapshot is less interesting but should be included for completeness.
+   * Preferably by UUID as well as path.
+   * If a snapshot was used, the UUID of the origin fs should be listed; the UUID of the snapshot (if it even has one) is less interesting as it's ephemeral.
    * The zfsbackup-client script itself doesn't and shouldn't care whether it's backing up a snapshot or not; this should be handled by pre/post-client scripts.
  * The data has to be structured, with a fixed number of fields.
    * (It could even be stored in a database.)

@@ -1,6 +1,9 @@
 #!/bin/zsh
 #
 # sets korn.zfsbackup:config[$:BACKUPSERVER] to the name of the sources.d directory just created.
+#
+# TODO: if --no-xdev was specified, also set it on all child filesystems -- maybe? But what if most of those are going to be excluded manually?
+# It's unclear what the right thing to do is.
 
 function set_zfsbackup_config_property() {
 	echo setting ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" on "$1"...

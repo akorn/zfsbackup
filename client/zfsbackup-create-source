@@ -2,8 +2,9 @@
 
 HARDLINKFILES=(username password no-sparse no-xattrs no-acls
 no-hard-links no-delete no-partial no-xdev no-inplace compress
-compress-level bwlimit timeout)
-COPYFILES=(exclude include files filter check pre-client post-client options)
+compress-level bwlimit timeout timelimit)
+COPYFILES=(exclude include files filter check pre-client post-client options
+stdout stderr)
 SOURCES=/etc/zfsbackup/sources.d
 SCRIPTS=/usr/local/share/zfsbackup
 DEFAULTDIR=/etc/zfsbackup/client-defaults

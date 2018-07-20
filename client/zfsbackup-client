@@ -53,31 +53,61 @@ function start_logger() {
 	have_logger=1
 }
 
+# fetches source related metadata from current directory and exports it in environment variables
+function update_metadata() {
+	if [[ -z "$preclient_exit" ]]; then # running for first time
+		export fsuuid=UNKNOWN; [[ -e fsuuid ]] && fsuuid=$(< fsuuid)
+		if [[ -e zfs-dataset ]]; then
+			fstype=zfs
+		elif ! fstype=$(findmnt -n -o FSTYPE $(readlink -f ./path/.)); then
+			fstype=UNKNOWN
+		fi
+		export fstype
+	else # pre-client already run; some of the above may have changed as a result
+		if [[ -e fsuuid ]]; then
+			fsuuid=$(< fsuuid)
+			# the following elif branch doesn't make sense before running pre-client as the fs to be backed up may not even be mounted yet
+		elif \
+			   ! fsuuid=$(findmnt ./path/. -n -o UUID) \
+			&& ! fsuuid=$(findmnt ./path/. -n -o SOURCE); then	# zfs path name
+			fsuuid=$(readlink -f ./path/.)	# last resort, for example if we're only backing up a subdirectory
+			# maybe instead of trying to shoehorn something useful into fsuuid, we should export all data returned by findmnt instead?
+		fi
+		if [[ -e zfs-dataset ]]; then
+			fstype=zfs
+		elif ! fstype=$(findmnt -n -o FSTYPE $(readlink -f ./path/.)); then
+			fstype=UNKNOWN
+		fi
+	fi
+}
+
 if [[ "$1" == "--server" ]]; then
 	shift
 	backupservers=(${=1//,/ })
 	shift
 fi
 
-# the array contains at least one item (the empty string)
+# the array contains at least one item (the empty string if nothing else)
 for BACKUPSERVER in "$backupservers[@]"; do
 
+	export BACKUPSERVER	# make this available to pre-client and post-client scripts
 	# we have to source the config here so that $BACKUPSERVER
 	# can be expanded in it where needed
 	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-	for source in $(get_sources $*); do
+	for zbSOURCENAME in $(get_sources $*); do # get_sources only returns absolute paths
+		export zbSOURCENAME # make this available to pre-client and post-client scripts
 		unset rsync_options
 		unset USER
 		unset preclient_exit
 		unset rsync_exit
-		echo "$0: INFO: processing $source." >&2
-		cd "$source" || {
-			echo "$0: WARNING: can't chdir to $source. Skipping." >&2
+		echo "$0: INFO: processing $zbSOURCENAME." >&2
+		cd "$zbSOURCENAME" || {
+			echo "$0: WARNING: can't chdir to $zbSOURCENAME. Skipping." >&2
 			continue
 		}
 		[[ -r url ]] || {
-			echo "$0: ERROR: $source is missing url. Skipping." >&2
+			echo "$0: ERROR: $zbSOURCENAME is missing url. Skipping." >&2
 			continue
 		}
 		url="$(head -n 1 url)"
@@ -96,51 +126,55 @@ for BACKUPSERVER in "$backupservers[@]"; do
 		[[ -e no-inplace ]] || rsync_options=($rsync_options --inplace)
 		[[ -e no-inplace ]] && ! [[ -e no-sparse ]] && rsync_options=($rsync_options -S)
 		[[ -e compress ]] && rsync_options=($rsync_options -z)
-		[[ -r compress-level ]] && rsync_options=($rsync_options --compress-level="$mapfile[compress-level]")
-		[[ -r bwlimit ]] && rsync_options=($rsync_options --bwlimit="$mapfile[bwlimit]")
-		[[ -r timeout ]] && rsync_options=($rsync_options --timeout="$mapfile[timeout]") \
+		[[ -r compress-level ]] && rsync_options=($rsync_options --compress-level="$(<compress-level)")
+		[[ -r bwlimit ]] && rsync_options=($rsync_options --bwlimit="$(<bwlimit)")
+		[[ -r timeout ]] && rsync_options=($rsync_options --timeout="$(<timeout)") \
 			|| rsync_options=($rsync_options --timeout=3600)
+		[[ -r timelimit ]] && timelimit=(timeout -k 5 "$(<timelimit)") || unset timelimit
 		[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
+		export rsync_options # make this available to pre-client and post-client scripts
 		( # subshell so that we can redirect stdout/stderr safely, as well as use 'exit'
-			starttime=$EPOCHSECONDS
-			fsuuid=UNKNOWN
-			snapuuid=N/A
-			fstype=UNKNOWN
-			[[ -e stdout ]] && exec >stdout || {
-				start_logger
-				exec >&p
-			}
-			[[ -e stderr ]] && exec 2>stderr || {
-				start_logger
-				exec 2>&p
-			}
+			export starttime=$EPOCHSECONDS
+
+			update_metadata
+
+			[[ -e stdout ]] && exec >stdout || { start_logger; exec >&p }
+			[[ -e stderr ]] && exec 2>stderr || { start_logger; exec 2>&p }
+
 # Lock usage is still slightly racy; for example, it's possible that pre-client will be run twice.
 # To avoid that, the entire subshell bit would have to be in a separate script.
 			if [[ -x check ]]; then
 				with_lock ./check
 				check_result="$?"
+				echo $check_result >check-exit-status	# TODO: maybe output files like this one should go to a subdirectory?
 				[[ "$check_result" = "0" ]] || {
 					echo "$EPOCHSECONDS CHECKFAILED_$check_result $source"
 					exit $check_result
 				}
 			fi
+
 # Not reached if check_result != 0
 			if [[ -x pre-client ]]; then
 				with_lock ./pre-client
 				preclient_exit="$?"
+				echo $preclient_exit >pre-client-exit-status
 			else
 				preclient_exit="0"
 			fi
 			if [[ -d pre-client.d ]]; then
 				with_lock run-parts --report ./pre-client.d
-				((preclient_exit+=$?))
+				preclientd_exit="$?"
+				((preclient_exit+=preclientd_exit))
+				echo $preclientd_exit >pre-client.d-exit-status
 			fi
+			update_metadata
+
 			if [[ "$preclient_exit" = "0" ]]; then
 				[[ -f path ]] && mypath="$(head -n 1 path)"
 				[[ -f path ]] || mypath=path/.
 				if [[ -z "$mypath" ]]; then
 # this is an internal error that I want to be sure is logged (and we shouldn't run rsync with an empty $mypath).
-					echo "$0: FATAL: mypath variable was empty while processing $source." >&2
+					echo "$0: FATAL: mypath variable was empty while processing $zbSOURCENAME." >&2
 					rsync_exit=111
 				else
 					for kludge in {1..10}; do	# switching to auto-mounted zfs snapshots doesn't always work on the first try on some kernels
@@ -148,14 +182,15 @@ for BACKUPSERVER in "$backupservers[@]"; do
 						sleep 0.5
 					done
 					if [[ "$cdsuccess" = "1" ]]; then
-						with_lock rsync -a $rsync_options[@] . "$url"
+						with_lock $timelimit rsync -a $rsync_options[@] . "$url"
 						rsync_exit="$?"
+						echo $rsync_exit >rsync-exit-status
 						if [[ "$rsync_exit" = 0 ]]; then
 							touch "$source/stamp-success"
 							rm -f "$source/stamp-failure" 2>/dev/null
 						else
 							# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
-							echo "rsync $rsync_exit" >"$source/stamp-failure"
+							echo "rsync returned $rsync_exit" >"$zbSOURCENAME/stamp-failure"
 						fi
 					else
 						echo "$0: FATAL: unable to chdir to $mypath." >&2
@@ -163,23 +198,25 @@ for BACKUPSERVER in "$backupservers[@]"; do
 					fi
 				fi
 			else
-				echo "preclient $preclient_exit" >"$source/stamp-failure"
+				echo "preclient returned $preclient_exit" >stamp-failure
 			fi
-			cd "$source"
+			cd "$zbSOURCENAME"
 			if [[ -x post-client ]]; then
 				with_lock ./post-client "$preclient_exit" "$rsync_exit"
 				postclient_exit=$?
+				echo $postclient_exit >post-client-exit-status
 			else
 				postclient_exit=0
 			fi
 			if [[ -d post-client.d ]]; then
 				with_lock run-parts --report --arg "$preclient_exit" "$rsync_exit" post-client.d
-				((postclient_exit+=$?))
+				postclientd_exit="$?"
+				((postclient_exit+=postlientd_exit))
+				echo $postclientd_exit >post-client.d-exit-status
 			fi
+
 # logging (will become inventory later)
-			[[ -e fsuuid ]] && fsuuid=$(< fsuuid)
-			[[ -e snapuuid ]] && snapuuid=$(< snapuuid)
-			[[ -e fstype ]] && fstype=$(< fstype)
+			update_metadata
 			echo -n "$EPOCHSECONDS "
 			if [[ $preclient_exit = 0 ]]; then
 				if [[ $rsync_exit = 0 ]]; then
@@ -192,15 +229,15 @@ for BACKUPSERVER in "$backupservers[@]"; do
 			fi
 			echo -n "$source "
 			echo -n "$fsuuid "
-			echo -n "$snapuuid "
 			echo -n "$url "
 			echo -n "$fstype "
 			echo -n "$preclient_exit "
 			echo -n "$postclient_exit "
 			echo "$starttime"
+			echo $[rsync_exit+postclient_exit] >zfsbackup-client-exit-status
 			exit $[rsync_exit+postclient_exit]
 		)
 		((final_exit_status+=$?))
-	done # for source in $(get_sources $*); do
+	done # for zbSOURCENAME in $(get_sources $*); do
 done # for BACKUPSERVER in $backupservers[@]; do
 exit $final_exit_status
