@@ -143,9 +143,10 @@ minsize=$(zfs get -Hp -o value ${PROPPREFIX}:minsize "$origin")
 [[ "$minsize" = "-" ]] && minsize=$MINSIZE
 mininodes=$(zfs get -Hp -o value ${PROPPREFIX}:mininodes "$origin")
 [[ "$mininodes" = "-" ]] && mininodes=$MININODES
-#sync # needed to make sure the usedbydataset value we're obtaining is final (?)
-sleep 30 # instead of syncing, which is too hard on other processes -- a sync of this fs is bound to happen within 30s, right? right?
-actualsize="$(zfs get -Hp -o value usedbydataset "$origin")"
+#sync # needed to make sure the lrefer value we're obtaining is final (?)
+#sleep 30 # instead of syncing, which is too hard on other processes -- a sync of this fs is bound to happen within 30s, right? right?
+sync -f $RSYNC_MODULE_PATH/.	# this translates to a syncfs() call, which should sync just this fs
+actualsize="$(zfs get -Hp -o value lrefer "$origin")"
 df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
 if [[ "$minsize" -gt 0 ]]; then
 	if [[ "$actualsize" -lt "$minsize" ]]; then
