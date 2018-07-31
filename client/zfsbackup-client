@@ -16,6 +16,7 @@ typeset -a backupservers BACKUPSERVERS
 # it's better to be safe than sorry.
 backupservers=($BACKUPSERVERS[@])
 [[ -z $backupservers[@] ]] && backupservers=("")
+final_exit_status=0
 
 zmodload zsh/mapfile
 zmodload zsh/datetime
@@ -24,7 +25,7 @@ zmodload zsh/datetime
 function with_lock() {
 	case "$lockprog" in
 		chpst)
-			chpst -L "/var/lock/zfsbackup-client.${source//\//_}.lock" $@;;
+			chpst -L "/var/lock/zfsbackup-client.${zbSOURCENAME//\//_}.lock" $@;;
 		"")
 			$@;;
 		*)
@@ -44,12 +45,9 @@ function get_sources() {
 	return 0
 }	
 
-final_exit_status=0
-export source
-
 function start_logger() {
 	# starts a logger coprocess if one doesn't exist already
-	[[ -z "$have_logger" ]] && coproc logger --id -t "zfsbackup: $source"
+	[[ -z "$have_logger" ]] && coproc logger --id -t "zfsbackup: $zbSOURCENAME"
 	have_logger=1
 }
 
@@ -148,7 +146,7 @@ for BACKUPSERVER in "$backupservers[@]"; do
 				check_result="$?"
 				echo $check_result >check-exit-status	# TODO: maybe output files like this one should go to a subdirectory?
 				[[ "$check_result" = "0" ]] || {
-					echo "$EPOCHSECONDS CHECKFAILED_$check_result $source"
+					echo "$EPOCHSECONDS CHECKFAILED_$check_result $zbSOURCENAME"
 					exit $check_result
 				}
 			fi
@@ -186,8 +184,8 @@ for BACKUPSERVER in "$backupservers[@]"; do
 						rsync_exit="$?"
 						echo $rsync_exit >rsync-exit-status
 						if [[ "$rsync_exit" = 0 ]]; then
-							touch "$source/stamp-success"
-							rm -f "$source/stamp-failure" 2>/dev/null
+							touch "$zbSOURCENAME/stamp-success"
+							rm -f "$zbSOURCENAME/stamp-failure" 2>/dev/null
 						else
 							# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
 							echo "rsync returned $rsync_exit" >"$zbSOURCENAME/stamp-failure"
@@ -227,7 +225,7 @@ for BACKUPSERVER in "$backupservers[@]"; do
 			else
 				echo -n "PRECLIENT_FAIL_$preclient_exit "
 			fi
-			echo -n "$source "
+			echo -n "$zbSOURCENAME "
 			echo -n "$fsuuid "
 			echo -n "$url "
 			echo -n "$fstype "
