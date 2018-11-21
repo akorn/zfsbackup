@@ -68,7 +68,7 @@ FAKESUPER=true
 BINDROOT=/mnt
 # An array of zfs properties you want set on newly created zfs instances,
 # if any (note that currently there is no way to override these from the
-# command line; maybe  instead of setting them here, you should let them
+# command line; maybe instead of setting them here, you should let them
 # be inherited from the parent fs on the server):
 #DEFAULT_ZFS_PROPERTIES=(-o exec=off -o suid=off -o devices=off)
 # You might want to use something like:
@@ -87,7 +87,7 @@ touch password
 chmod 400 password
 echo "sKrit!" >password # Password the client will use to authenticate itself to server when sending backups
 echo "rsync://backup.hostname.or.ip/__PATH__" >url-template # __PATH__ will be automatically substituted
-echo "client-writer-username" >u	sername # Username to use when sending backups (should be different from username used to restore them; $(hostname)-writer is not a bad choice)
+echo "client-writer-username" >username # Username to use when sending backups (should be different from username used to restore them; $(hostname)-writer is not a bad choice)
 ```
 
 If you have more than one server, create `client-defaults`, with one subdir per backup server, then proceed as above in each subdir.
