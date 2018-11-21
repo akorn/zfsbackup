@@ -1,10 +1,14 @@
 #!/bin/zsh
 
-HARDLINKFILES=(username password no-sparse no-xattrs no-acls
-no-hard-links no-delete no-partial no-xdev no-inplace compress
-compress-level bwlimit timeout timelimit)
-COPYFILES=(exclude include files filter check pre-client post-client options
-stdout stderr)
+HARDLINKFILES=(
+bwlimit compress compress-level log-file-format no-acls no-delete
+no-delete-excluded no-hard-links no-inplace no-partial no-sparse no-xattrs
+no-xdev password timelimit timeout username
+)
+COPYFILES=(
+check exclude files filter include options post-client pre-client stderr
+stdout
+)
 SOURCES=/etc/zfsbackup/sources.d
 SCRIPTS=/usr/local/share/zfsbackup
 DEFAULTDIR=/etc/zfsbackup/client-defaults
@@ -85,36 +89,38 @@ the below order):
 -s, --snap	NOT IMPLEMENTED. Reserved for LVM snapshot support.
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).
--u, --username	Override remote username.
--e, --exclude	Override exclude file.
--i, --include	Override include file.
---files		Override "files" file (for --files-from).
--f, --filter	Override filter file.
---no-sparse	Create no-sparse flag file.
--S, --sparse	Remove no-sparse flag file.
---no-xattrs	Create no-xattrs flag file.
--X, --xattrs	Remove no-xattrs flag file.
---no-acls	Create no-acls flag file.
 -A, --acls	Remove no-acls flag file.
---no-hard-links Create no-hard-links flag file.
--H, --hard-links Remove no-hard-links flag file.
---no-delete	Create no-delete flag file.
+--bwlimit	Override bwlimit.
+--compress	Create compress flag file.
+--compress-level Override compress level.
 --delete	Remove no-delete flag file.
+--delete-excluded Remove no-delete-excluded flag file.
+-e, --exclude	Override exclude file.
+--fake-super	Explicitly sets zbFAKESUPER=1 and exports it for mksource.d
+-f, --filter	Override filter file.
+--files		Override "files" file (for --files-from).
+-H, --hard-links Remove no-hard-links flag file.
+-i, --include	Override include file.
+--inplace	Remove no-inplace flag file.
+--no-acls	Create no-acls flag file.
+--no-compress	Remove compress flag file.
+--no-delete	Create no-delete flag file.
+--no-delete-excluded Create no-delete-excluded flag file.
+--no-fake-super	Explicitly sets zbFAKESUPER=0 and exports it for mksource.d
+--no-hard-links Create no-hard-links flag file.
+--no-inplace	Create no-inplace flag file.
 --no-partial	Create no-partial flag file.
--P, --partial	Remove no-partial flag file.
+--no-sparse	Create no-sparse flag file.
+--no-xattrs	Create no-xattrs flag file.
 --no-xdev	Create no-xdev flag file (will cross filesystem boundaries).
+-o prop=val	Set zfs property "prop" to value "val" on remote zfs dataset we create.
+-P, --partial	Remove no-partial flag file.
+-S, --sparse	Remove no-sparse flag file.
+--url		Provide specific URL to back up to.
+-u, --username	Override remote username.
+-X, --xattrs	Remove no-xattrs flag file.
 -x, --xdev	Remove no-xdev flag file (won't cross filesystem boundaries;
 		this is the default).
---no-inplace	Create no-inplace flag file.
---inplace	Remove no-inplace flag file.
---compress	Create compress flag file.
---no-compress	Remove compress flag file.
---compress-level Override compress level.
---bwlimit	Override bwlimit.
---url		Provide specific URL to back up to.
---fake-super	Explicitly sets zbFAKESUPER=1 and exports it for mksource.d
---no-fake-super	Explicitly sets zbFAKESUPER=0 and exports it for mksource.d
--o prop=val	Set zfs property "prop" to value "val" on remote zfs dataset we create.
 
 See the README file for details.
 EOF
@@ -158,7 +164,9 @@ while [[ -n "$1" ]]; do
 		--no-hard-links) 		zbNOHARDLINKS="1"; zbFORCEHARDLINKS="0";;
 		-H|--hard-links) 		zbFORCEHARDLINKS="1"; zbNOHARDLINKS="0";;
 		--delete) 			zbFORCEDELETE="1"; zbNODELETE="0";;
+		--delete-excluded)		zbFORCEDELETEEXCLUDED="1"; zbNODELETEEXCLUDED="0";;
 		--no-delete) 			zbNODELETE="1"; zbFORCEDELETE="0";;
+		--no-delete-excluded)		zbNODELETEEXCLUDED="1"; zbFORCEDELETEEXCLUDED="0";;
 		--no-partial) 			zbNOPARTIAL="1"; zbFORCEPARTIAL="0";;
 		-P|--partial) 			zbFORCEPARTIAL="1"; zbNOPARTIAL="0";;
 		--no-xdev) 			zbNOXDEV="1"; zbFORCEXDEV="0";;
@@ -344,15 +352,16 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
 	[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
 	[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
+	flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
+	flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
+	flagfile "$zbNODELETEEXCLUDED" "$zbFORCEDELETEEXCLUDED" no-delete-excluded
+	flagfile "$zbNODELETE" "$zbFORCEDELETE" no-delete
+	flagfile "$zbNOHARDLINKS" "$zbFORCEHARDLINKS" no-hard-links
+	flagfile "$zbNOINPLACE" "$zbFORCEINPLACE" no-inplace
+	flagfile "$zbNOPARTIAL" "$zbFORCEPARTIAL" no-partial
 	flagfile "$zbNOSPARSE" "$zbFORCESPARSE" no-sparse
 	flagfile "$zbNOXATTRS" "$zbFORCEXATTRS" no-xattrs
-	flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
-	flagfile "$zbNOHARDLINKS" "$zbFORCEHARDLINKS" no-hard-links
-	flagfile "$zbNODELETE" "$zbFORCEDELETE" no-delete
-	flagfile "$zbNOPARTIAL" "$zbFORCEPARTIAL" no-partial
 	flagfile "$zbNOXDEV" "$zbFORCEXDEV" no-xdev
-	flagfile "$zbNOINPLACE" "$zbFORCEINPLACE" no-inplace
-	flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
 	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
 	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
 	[[ -n "$zbBWLIMIT" ]] && echo "$zbBWLIMIT" >"$zbSOURCENAME"/bwlimit
