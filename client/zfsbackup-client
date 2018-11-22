@@ -130,7 +130,7 @@ for BACKUPSERVER in "$backupservers[@]"; do
 		[[ -e no-acls ]] || rsync_options=($rsync_options -A)
 		[[ -e no-delete ]] || rsync_options=($rsync_options --delete)
 		[[ -e no-delete-excluded ]] || rsync_options=($rsync_options --delete-excluded)
-		[[ -e no-hard-links ]] || rsync_options=(-H)
+		[[ -e no-hard-links ]] || rsync_options=($rsync_options -H)
 		[[ -e no-inplace ]] || rsync_options=($rsync_options --inplace)
 		[[ -e no-inplace ]] && ! [[ -e no-sparse ]] && rsync_options=($rsync_options -S)
 		[[ -e no-partial ]] || rsync_options=($rsync_options --partial)
