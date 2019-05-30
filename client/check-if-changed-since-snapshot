@@ -20,7 +20,7 @@ fi
 # The above was the easy bit; we had the exact same snapshot that was used to create the backup. If we're still running, that snapshot no longer exists.
 # Now we need to find all snapshots in decreasing order of creation time; skip the ones that are younger than the last successful backup; and check the youngest that predates the backup.
 
-zfs list -r -t snapshot -S creation -Hp -o name,creation | while read snapshot_name snapshot_created; do
+zfs list -d 1 -t snapshot -S creation -Hp -o name,creation | while read snapshot_name snapshot_created; do
 	[[ $snapshot_created -ge $last_success ]] && continue	# greater or equal; if equal, snapshot could have been taken just after successful backup, and could conceivably contain new writes
 	[[ $(zfs get -Hp -o value written@$snapshot_name $myfs) = 0 ]] && exit 1
 	exit 0
