@@ -62,11 +62,7 @@ function start_logger() {
 function update_metadata() {
 	if [[ -z "$preclient_exit" ]]; then # running for first time
 		export fsuuid=UNKNOWN; [[ -e fsuuid ]] && fsuuid=$(< fsuuid)
-		if [[ -e zfs-dataset ]]; then
-			fstype=zfs
-		elif ! fstype=$(findmnt -n -o FSTYPE $(readlink -f ./path/.)); then
-			fstype=UNKNOWN
-		fi
+		fstype=$(findmnt -n -o FSTYPE ./path/.) || fstype=UNKNOWN
 		export fstype
 	else # pre-client already run; some of the above may have changed as a result
 		if [[ -e fsuuid ]]; then
@@ -78,10 +74,15 @@ function update_metadata() {
 			fsuuid=$(readlink -f ./path/.)	# last resort, for example if we're only backing up a subdirectory
 			# maybe instead of trying to shoehorn something useful into fsuuid, we should export all data returned by findmnt instead?
 		fi
-		if [[ -e zfs-dataset ]]; then
-			fstype=zfs
-		elif ! fstype=$(findmnt -n -o FSTYPE $(readlink -f ./path/.)); then
-			fstype=UNKNOWN
+		fstype=$(findmnt -n -o FSTYPE ./path/.) || fstype=UNKNOWN
+		if [[ $fstype = zfs ]]; then	# if zfs, see if we backed up a snapshot
+			local source=$(findmnt -n -o SOURCE ./path/.)
+			if [[ $source =~ .@. ]]; then	# there must be at least one character before and after the @ for it to be a valid zfs snapshot name
+				export snapshot_name=$source
+				export snapshot_created=$(zfs get -Hp -o value creation $source)
+			else
+				unset snapshot_name snapshot_created
+			fi
 		fi
 	fi
 }
@@ -106,7 +107,7 @@ for BACKUPSERVER in "$backupservers[@]"; do
 		export zbSOURCENAME # make this available to pre-client and post-client scripts
 		unset rsync_options
 		unset USER
-		unset preclient_exit
+		unset preclient_exit preclientd_exit postclient_exit postclientd_exit
 		unset rsync_exit
 		echo "$0: INFO: processing $zbSOURCENAME." >&2
 		cd "$zbSOURCENAME" || {
@@ -176,10 +177,18 @@ for BACKUPSERVER in "$backupservers[@]"; do
 				preclientd_exit="$?"
 				((preclient_exit+=preclientd_exit))
 				echo $preclientd_exit >pre-client.d-exit-status
+			else
+				preclientd_exit="0"
 			fi
-			update_metadata
 
-			if [[ "$preclient_exit" = "0" ]]; then
+			update_metadata
+			if [[ -n "$snapshot_name" ]]; then
+				echo "$snapshot_name" >last-backed-up-snapshot-name
+				echo "$snapshot_created" >last-backed-up-snapshot-creation
+				touch --date @$snapshot_created last-backed-up-snapshot-creation
+			fi
+
+			if [[ "$preclient_exit" = "0" ]] && [[ "$preclientd_exit" = "0" ]]; then
 				[[ -f path ]] && mypath="$(head -n 1 path)"
 				[[ -f path ]] || mypath=path/.
 				if [[ -z "$mypath" ]]; then
@@ -198,6 +207,11 @@ for BACKUPSERVER in "$backupservers[@]"; do
 						if [[ "$rsync_exit" = 0 ]]; then
 							touch "$zbSOURCENAME/stamp-success"
 							rm -f "$zbSOURCENAME/stamp-failure" 2>/dev/null
+							if [[ -n "$snapshot_name" ]]; then
+								echo "$snapshot_name" >last-successfully-backed-up-snapshot-name
+								echo "$snapshot_created" >last-successfully-backed-up-snapshot-creation
+								touch --date @$snapshot_created last-successfully-backed-up-snapshot-creation
+							fi
 						else
 							# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
 							echo "rsync returned $rsync_exit" >"$zbSOURCENAME/stamp-failure"
@@ -208,21 +222,25 @@ for BACKUPSERVER in "$backupservers[@]"; do
 					fi
 				fi
 			else
-				echo "preclient returned $preclient_exit" >"$zbSOURCENAME/stamp-failure"
+				: >"$zbSOURCENAME/stamp-failure"
+				((preclient_exit)) && echo "pre-client returned $preclient_exit" >>"$zbSOURCENAME/stamp-failure"
+				((preclientd_exit)) && echo "pre-client.d returned $preclient_exit" >>"$zbSOURCENAME/stamp-failure" 
 			fi
 			cd "$zbSOURCENAME"
 			if [[ -x post-client ]]; then
-				with_lock ./post-client "$preclient_exit" "$rsync_exit"
+				with_lock ./post-client "$preclient_exit" "$preclientd_exit" "$rsync_exit"
 				postclient_exit=$?
 				echo $postclient_exit >post-client-exit-status
 			else
 				postclient_exit=0
 			fi
 			if [[ -d post-client.d ]]; then
-				with_lock run-parts --report --arg "$preclient_exit" "$rsync_exit" post-client.d
+				with_lock run-parts --report --arg "$preclient_exit" "$preclientd_exit" "$rsync_exit" post-client.d
 				postclientd_exit="$?"
 				((postclient_exit+=postlientd_exit))
 				echo $postclientd_exit >post-client.d-exit-status
+			else
+				postclientd_exit=0
 			fi
 
 # logging (will become inventory later)
@@ -241,11 +259,13 @@ for BACKUPSERVER in "$backupservers[@]"; do
 			echo -n "$fsuuid "
 			echo -n "$url "
 			echo -n "$fstype "
+			echo -n "$snapshot_name "
+			echo -n "$snapshot_created "
 			echo -n "$preclient_exit "
 			echo -n "$postclient_exit "
 			echo "$starttime"
-			echo $[rsync_exit+postclient_exit] >zfsbackup-client-exit-status
-			exit $[rsync_exit+postclient_exit]
+			echo $[rsync_exit+postclient_exit+postclientd_exit] >zfsbackup-client-exit-status
+			exit $[rsync_exit+postclient_exit+postclientd_exit]
 		)
 		((final_exit_status+=$?))
 	done # for zbSOURCENAME in $(get_sources $*); do
