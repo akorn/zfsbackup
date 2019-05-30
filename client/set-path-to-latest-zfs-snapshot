@@ -21,7 +21,7 @@ mountpoint -q "$mp/." || {
 	echo "$0: ERROR: '$mp/.zfs/snapshot/.' doesn't exist." >&2
 	exit 2
 }
-zfs list -t snapshot -H -o name -S creation | grep "^${myfs}@" | head -n 1 | read snapshot
+zfs list -r -t snapshot -H -o name -S creation ${myfs} | head -n 1 | read snapshot
 snapshot="$(echo "$snapshot" | sed 's/[^@]*@//')"
 for i in {1..5}; do # This needs to be retried a few times because of some timing issue
 	pushd "$mp/.zfs/snapshot/$snapshot/." # switch to the directory to force it to become mounted
