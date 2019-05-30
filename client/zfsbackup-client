@@ -208,9 +208,9 @@ for BACKUPSERVER in "$backupservers[@]"; do
 							touch "$zbSOURCENAME/stamp-success"
 							rm -f "$zbSOURCENAME/stamp-failure" 2>/dev/null
 							if [[ -n "$snapshot_name" ]]; then
-								echo "$snapshot_name" >last-successfully-backed-up-snapshot-name
-								echo "$snapshot_created" >last-successfully-backed-up-snapshot-creation
-								touch --date @$snapshot_created last-successfully-backed-up-snapshot-creation
+								echo "$snapshot_name" >$zbSOURCENAME/last-successfully-backed-up-snapshot-name
+								echo "$snapshot_created" >$zbSOURCENAME/last-successfully-backed-up-snapshot-creation
+								touch --date @$snapshot_created $zbSOURCENAME/last-successfully-backed-up-snapshot-creation
 							fi
 						else
 							# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
