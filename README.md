@@ -44,7 +44,7 @@ backed up, and each of which can contain the following files and directories:
  * `options` -- further options to pass to `rsync`, one per line. The last line should not have a trailing newline.
  * `password` -- password to send to rsyncd
  * `path` -- if it's a symlink to a directory, the directory to copy (back up); if it's a file or a symlink to a file, the first line is taken to be the name of the directory to copy. If it's neither, the results are undefined.
- * `post-client` -- a script to run on the client after copying finished (or immediately after `pre-client`, if `pre-client` fails). Its first argument is the exit status of `pre-client`; the 2nd argument is the exit status of `rsync` (provided it was run).
+ * `post-client` -- a script to run on the client after copying finished (or immediately after `pre-client`, if `pre-client` fails). Its first two arguments are the exit status of `pre-client` and `pre-client.d` (or 0); the 2nd argument is the exit status of `rsync` (provided it was run).
  * `post-client.d/` -- a directory that will be passed to run-parts (after post-client has been run, if it exists). The scripts in this directory will receive the same arguments as `post-client`.
  * `pre-client` -- a script to run on the client before copying begins; if it returns unsuccessfully, `rsync` is not started, but `post-client` is still run. The supplied `client/set-path-to-latest-zfs-snapshot` script can be used as a `pre-client` script to find the latest existing snapshot of a given zfs dataset and make the path symlink point to it (in `.zfs/snapshot`).
  * `pre-client.d/` -- a directory that will be passed to `run-parts` (after `pre-client` has been run, if it exists).
@@ -54,9 +54,25 @@ backed up, and each of which can contain the following files and directories:
  * `timelimit` -- Kill the rsync process after this many seconds. No enforced timeout if the file is not present. Depends on timeout(1) from coreutils.
  * `timeout` -- Tell rsync to exit if no data is transferred for this many seconds (`--timeout`). No trailing newline, just the number. Defaults to 3600.
  * `url` -- rsync URL to upload to (single line; subsequent lines are ignored)
- * `username` -- username to send to rsyncd
- * `zfs-dataset` -- used by `set-path-to-latest-zfs-snapshot` helper script; it finds the latest snapshot of the ZFS dataset named in `zfs-dataset`, then makes `path` a symlink to it before invoking `rsync` on `path`. TODO: support zvols.
+ * `username` -- username to send to `rsyncd`
+ * `zfs-dataset` -- used by `set-path-to-latest-zfs-snapshot` `pre-client` script; it finds the latest snapshot of the ZFS dataset named in `zfs-dataset`, then makes `path` a symlink to it before invoking `rsync` on `path`. TODO: support zvols.
 
+Additionally, the `zfsbackup` scripts can create the following files:
+
+ * `check-exit-status` -- the exit status of the `./check` script when it was last run.
+ * `last-backed-up-snapshot-creation` -- the creation date (in epoch seconds) of the snapshot we last tried to back up. Currently only supported/created for zfs. The mtime of this file is set to the date it contains.
+ * `last-backed-up-snapshot-name` -- the name of the snapshot we last tried to back up. Currently only supported/created for zfs.
+ * `last-successfully-backed-up-snapshot-creation` -- the creation date (in epoch seconds) of the zfs snapshot we last backed up successfully. Currently only supported/created for zfs. The mtime of this file is set to the date it contains.
+ * `last-successfully-backed-up-snapshot-name` -- the name of the zfs snapshot we last backed up successfully. Currently only supported/created for zfs.
+ * `post-client-exit-status` -- the exit status of the `./post-client` script when it was last run.
+ * `post-client.d-exit-status` -- the exit status of `run-parts --report ./post-client.d` when it was last run.
+ * `pre-client-exit-status` -- the exit status of the `./pre-client` script when it was last run.
+ * `pre-client.d-exit-status` -- the exit status of `run-parts --report ./pre-client.d` when it was last run.
+ * `rsync-exit-status` -- the exit status of the rsync process itself, from when it last completed (if rsync is currently running, the file may exist but will contain the exit status of the previous instance).
+ * `stamp-failure` -- created and its timestamp updated whenever a backup is attempted but fails. Removed when a backup succeeds. Can be used to find datasets that weren't backed up successfully. Contains a brief message that indicates why the client thinks the backup failed.
+ * `stamp-success` -- created and its timestamp updated whenever a backup completes successfully. Can be used to check when the last successful backup has taken place.
+ * `zfsbackup-client-exit-status` -- the exit status of the entire `zfsbackup-client` subshell that processed this data source. Currently, this is the sum of the exit statuses of `rsync` and all post-client processes.
+ 
 Other specific `rsync` options may be supported explicitly in future versions.
 
 You may place other files in `sources.d` directories (needed by custom pre- or
