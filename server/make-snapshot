@@ -181,8 +181,8 @@ properties=($properties -o ${PROPPREFIX}:expires="$expires")
 properties=($properties -o ${PROPPREFIX}:expires-readable="$expires_readable")
 
 echo "${0:t}[$RSYNC_PID]: transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) finished (exit status $RSYNC_EXIT_STATUS)." >&2
-echo "${0:t}[$RSYNC_PID]: Running zfs snapshot $properties[@] $snapname" >&2
-zfs snapshot $properties[@] "$snapname" >&2
+echo "${0:t}[$RSYNC_PID]: Running zfs snapshot $@ $properties[@] $snapname" >&2
+zfs snapshot $@ $properties[@] "$snapname" >&2
 
 if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
 	if ! [[ "$expires" = "never" ]]; then
