@@ -13,15 +13,15 @@ zmodload zsh/stat
 myfs="${1:-$(head -n 1 zfs-dataset)}"
 last_success=$(zstat +mtime stamp-success)
 snapshot_name=$(<last-successfully-backed-up-snapshot-name)
-if snapshot_created=$(zfs get -Hp -o value creation $myfs@$snapshot_name); then	# only query this to make sure the snapshot still exists
+if snapshot_created=$(zfs get -Hp -o value creation $snapshot_name); then	# only query this to make sure the snapshot still exists
 	[[ $(zfs get -Hp -o value written@$snapshot_name $myfs) = 0 ]] && exit 1
 	exit 0
 fi
 # The above was the easy bit; we had the exact same snapshot that was used to create the backup. If we're still running, that snapshot no longer exists.
 # Now we need to find all snapshots in decreasing order of creation time; skip the ones that are younger than the last successful backup; and check the youngest that predates the backup.
 
-zfs list -d 1 -t snapshot -S creation -Hp -o name,creation | while read snapshot_name snapshot_created; do
+zfs list -d 1 -t snapshot -S creation -Hp -o name,creation $myfs | while read snapshot_name snapshot_created; do
 	[[ $snapshot_created -ge $last_success ]] && continue	# greater or equal; if equal, snapshot could have been taken just after successful backup, and could conceivably contain new writes
 	[[ $(zfs get -Hp -o value written@$snapshot_name $myfs) = 0 ]] && exit 1
 	exit 0
-fi
+done
