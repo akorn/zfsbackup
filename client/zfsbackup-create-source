@@ -15,7 +15,7 @@ DEFAULTDIR=/etc/zfsbackup/client-defaults
 MKSOURCE_D=/etc/zfsbackup/mksource.d
 REMOTEBACKUPPATH="$(hostname)"
 # Could be e.g. /mnt/zfsbackup
-BINDROOT=/mnt
+BINDROOT=/mnt/zfsbackup
 
 err_USAGE=1
 err_CANTCREATEDIR=2
@@ -51,10 +51,10 @@ function construct_bind_path() {
 	# Handle / specially
 	case "$realpath" in
 		/)
-			zbBINDPATH="$BINDROOT"/rootfs
+			zbBINDPATH="$BINDROOT"${BACKUPSERVER:+/$BACKUPSERVER}rootfs
 			;;
 		/*)
-			zbBINDPATH="$BINDROOT$realpath"
+			zbBINDPATH="$BINDROOT${BACKUPSERVER:+/$BACKUPSERVER}$realpath"
 			;;
 		*)
 			echo "construct_bind_path: path must be absolute for -b to work, but '$realpath' isn't. This is a bug." >&2
