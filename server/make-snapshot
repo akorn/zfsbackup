@@ -1,6 +1,10 @@
 #!/bin/zsh
 EXPIRE_DEFAULT="now + 3 days"
 EXPIRE_FAILED="$EXPIRE_DEFAULT"
+EXPIRE_YEARLY="now + 6 years"
+EXPIRE_MONTHLY="now + 1 year"
+EXPIRE_WEEKLY="now + 2 months"
+EXPIRE_DAILY="now + 1 week"
 SCHEDULE_ATJOB=1
 PATH_TO_REMOVESNAP=/var/lib/svn-checkout/misc-scripts/zfsbackup/server/remove-snapshot-if-allowed
 NAMEPREFIX_DEFAULT=extra # will be part of snapshot name
@@ -48,22 +52,22 @@ function expire_rule() {
 	}
 	pushd "$RSYNC_MODULE_PATH/.zfs/snapshot"
 	is_first_yearly && {
-		expires="$(date +%s --date "now + 6 years")"
+		expires="$(date +%s --date "$EXPIRE_YEARLY")"
 		nameprefix=yearly
 		popd; return 0
 	}
 	is_first_monthly && {
-		expires="$(date +%s --date "now + 1 year")"
+		expires="$(date +%s --date "$EXPIRE_MONTHLY")"
 		nameprefix=monthly
 		popd; return 0
 	}
 	is_first_weekly && {
-		expires="$(date +%s --date "now + 2 months")"
+		expires="$(date +%s --date "$EXPIRE_WEEKLY")"
 		nameprefix=weekly-$isoweekyear-$week
 		popd; return 0
 	}
 	is_first_daily && {
-		expires="$(date +%s --date "now + 1 week")"
+		expires="$(date +%s --date "$EXPIRE_DAILY")"
 		nameprefix=daily
 		popd; return 0
 	}
