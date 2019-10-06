@@ -50,6 +50,8 @@ MAX_RUNTIME=86400	# maximum number of seconds since zfsbackup-client run;
 LOADWATCH_HIGH=100	# what system load level to suspend backup processes at
 LOADWATCH_LOW=10	# what system load level to resume suspended
 			# backup processes at
+CHRT=(chrt -i 0)	# used as a command prefix; the default runs the backup
+			# with the SCHED_IDLE scheduler, reducing its priority.
 SOURCES=/etc/zfsbackup/sources.d
 
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
@@ -96,7 +98,7 @@ if [[ -x /usr/bin/loadwatch ]] && [[ -n "$LOADWATCH_HIGH" ]] && [[ -n "$LOADWATC
 else
 	unset loadwatch
 fi
-$loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]"
+$CHRT $loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]"
 cd $SOURCES || {
 	echo "FATAL: can't chdir to $SOURCES." >&2
 	error_exit
@@ -119,7 +121,7 @@ while [[ $flag_fail = 1 ]]; do
 					echo "stderr output from last $source run:" >&2
 					cat "$source/stderr" >&2
 				}
-				zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]" "$source"
+				$CHRT $loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]" "$source"
 			fi
 		done
 	else
