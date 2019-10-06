@@ -65,7 +65,7 @@ FAKESUPER=true
 # Where to create mountpoints for, and mount, directories to backup if we're using
 # bind mounts to back them up including stuff hidden under mountpoints. This setting
 # is used at zfs-create-source time.
-BINDROOT=/mnt
+BINDROOT=/mnt${BACKUPSERVER:+/$BACKUPSERVER}
 # An array of zfs properties you want set on newly created zfs instances,
 # if any (note that currently there is no way to override these from the
 # command line; maybe instead of setting them here, you should let them
