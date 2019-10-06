@@ -1,0 +1,16 @@
+#!/bin/zsh
+#
+# Part of "zfsbackup" (https://github.com/akorn/zfsbackup). Copyright (c) András Korn, 2019. License: GPLv3
+#
+# Purpose: get rid of bind mounts created by "rsync-restore-preexec"
+
+CONFIG="/etc/zfsbackup/restore-snaphot/$RSYNC_MODULE_NAME"
+
+[[ -e "$CONFIG" ]] && . "$CONFIG"	# can override $zfs_dataset. TODO: make recursive bind mounting optional (but probably still default)
+
+for i in *(/N); do
+	mountpoint -q $i/. && umount -R $i/.
+done
+
+rm -f *(@)
+exit 0
