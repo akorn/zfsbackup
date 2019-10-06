@@ -5,15 +5,7 @@
 # TODO: if --no-xdev was specified, also set it on all child filesystems -- maybe? But what if most of those are going to be excluded manually?
 # It's unclear what the right thing to do is.
 
-function set_zfsbackup_config_property() {
-	echo setting ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" on "$1"...
-	zfs set ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" "$1"
-}
-
-if [[ "$zbPATH_IS_ZFS" = "1" ]]; then
-	# explicitly zfs, being backed up via latest snapshot
-	set_zfsbackup_config_property "$zbPATH"
-elif [[ "$(findmnt -n -o TARGET "$zbPATH")" = "$zbPATH" ]] && [[ "$(findmnt -n -o FSTYPE "$zbPATH")" = "zfs" ]]; then
-	# happens to be zfs, and the backup starts at its root
-	set_zfsbackup_config_property "$(findmnt -n -o SOURCE "$zbPATH")"
+if [[ -n "$zbZFSDATASET" ]]; then
+	echo setting ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" on "$zbZFSDATASET"... >&2
+	zfs set ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" "$zbZFSDATASET"
 fi
