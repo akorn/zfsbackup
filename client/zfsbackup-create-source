@@ -25,58 +25,55 @@ err_INTERNAL=111
 # An array we'll put the names of the servers we're asked to back up to in.
 typeset -a backupservers BACKUPSERVERS
 
+export PROPPREFIX=${PROPPREFIX:-korn.zfsbackup}
+
 # we source the config once here, to seed the backupservers array
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-# copy config variable into internal one; BACKUPSERVERS will be overridden by
-# the config if we re-source it, which right now shouldn't be a problem, but
-# it's better to be safe than sorry.
+# The backupservers array will be overridden by servers specified on the command line; the all-capital BACKUPSERVERS array is specified in the config, which we re-source a number of times.
+# "backupservers" will default to the set of all configured servers:
 backupservers=($BACKUPSERVERS[@])
 [[ -z $backupservers[@] ]] && backupservers=("")
 
 # An array we'll accumulate zfs properties we get from the command line in.
 typeset -a zfsprops
 zfsprops=($DEFAULT_ZFS_PROPERTIES[@])
+typeset -U zbLNPRECLIENT zbLNPOSTCLIENT zbPRECLIENT zbPOSTCLIENT
 
 function flagfile() {
 	local docreate="$1"
 	local doremove="$2"
 	local filename="$zbSOURCENAME"/"$3"
-	[[ "$docreate" = "1" ]] && touch "$filename"
-	[[ "$doremove" = "1" ]] && [[ "$createdbyme[$3]" = "1" ]] && rm -f "$filename"
+	! [[ -e "$filename" ]] && ((docreate)) && (($createdbyme[$3])) && touch "$filename"
+	((doremove)) && (($createdbyme[$3])) && rm -f "$filename"
 }
 
 function construct_bind_path() {
 	local realpath="$1"
 	# Handle / specially
 	case "$realpath" in
-		/)
-			zbBINDPATH="$BINDROOT"${BACKUPSERVER:+/$BACKUPSERVER}rootfs
-			;;
-		/*)
-			zbBINDPATH="$BINDROOT${BACKUPSERVER:+/$BACKUPSERVER}$realpath"
-			;;
-		*)
-			echo "construct_bind_path: path must be absolute for -b to work, but '$realpath' isn't. This is a bug." >&2
-			exit $err_INTERNAL
-			;;
+		/)	zbBINDPATH="$BINDROOT"${BACKUPSERVER:+/$BACKUPSERVER}rootfs;;
+		/*)	zbBINDPATH="$BINDROOT${BACKUPSERVER:+/$BACKUPSERVER}$realpath";;
+		*)	echo "construct_bind_path: path must be absolute for -b to work, but '$realpath' isn't. This is a bug." >&2
+			exit $err_INTERNAL;;
 	esac
 }
 
-function usage() {
+function usage() {	# Using a here document requires a writable filesystem. Is this a problem?
 cat <<EOF
 zfsbackup-create-source takes the following arguments (which are evaluated in
 the below order):
 
 --server	Comma and/or space separated list of the names ("tags") of the
-		backup servers to use.
+		backup servers to use. See the HOWTO for details.
 -p, --path	Path to the directory to be backed up. If not specified,
 		a path symlink will not be created.
---pre[@]	Pre-client script to run. Will be copied into the sources.d
+--pre[@]	Pre-client script to run. Will be copied into the pre-client.d
 		dir unless --pre@ is used, in which case a symlink will be
-		created.
---post[@]	Post-client script; see --pre for details.
--c, --check[@]	Check script; see --pre for details.
+		created. Can be given multiple times.
+--post[@]	Post-client script; works like --pre.
+-c, --check[@]	Check script; works like --pre (except there is no check.d,
+		so currently only a single check script can exist).
 -b, --bind	Use shipped pre-bindmount and post-bindmount script as
 		pre-client and post-client script, respectively.
 		These will bind mount the source fs to a temporary directory
@@ -86,9 +83,16 @@ the below order):
 		have been mounted when the backup is performed. Use a
 		pre-client script that sets the path to the latest snapshot of
 		this zfs dataset and mounts it (via .zfs/snapshot).
--s, --snap	NOT IMPLEMENTED. Reserved for LVM snapshot support.
+-s, --snap	PARTIALLY IMPLEMENTED. Install create-and-mount-snapshot as
+		pre-client script. Can be used with --zsnap. Works with zfs;
+		currently requires manual steps for LVM. Installs appropriate
+		post-client script too.
+-rs --rsnap	Install create-and-mount-snapshot as a pre-client script;
+		create recursive snapshot of the zfs instance given in -p.
+		Implies --no-xdev. Installs appropriate post-client script too.
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).
+		Use only -d if you're reconfiguring an existing sources.d dir.
 -A, --acls	Remove no-acls flag file.
 --bwlimit	Override bwlimit.
 --compress	Create compress flag file.
@@ -116,7 +120,8 @@ the below order):
 -o prop=val	Set zfs property "prop" to value "val" on remote zfs dataset we create.
 -P, --partial	Remove no-partial flag file.
 -S, --sparse	Remove no-sparse flag file.
---url		Provide specific URL to back up to.
+--url		Provide specific URL to back up to. Normally this would be generated
+		from a template in $DEFAULTDIR/url-template.
 -u, --username	Override remote username.
 -X, --xattrs	Remove no-xattrs flag file.
 -x, --xdev	Remove no-xdev flag file (won't cross filesystem boundaries;
@@ -129,24 +134,31 @@ EOF
 while [[ -n "$1" ]]; do
 	case "$1" in
 		-b|--bind)
-			zbLNPRECLIENT="$SCRIPTS/client/pre-bindmount"
-			zbLNPOSTCLIENT="$SCRIPTS/client/post-bindmount"
+			zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/pre-bindmount")
+			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/post-bindmount")
 			zbBIND="1"
 			;;
 		-z|--zsnap)
-			zbLNPRECLIENT="$SCRIPTS/client/set-path-to-latest-zfs-snapshot"
+			zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/set-path-to-latest-zfs-snapshot")
 			zbPATH_IS_ZFS="1"
 			;;
 		-s|--snap)
-			echo "$0: FATAL: Sorry, --snap is not yet implemented." >&2
-			exit $err_NOTIMPLEMENTED
+			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")
+			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot")
+			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
+			;;
+		-rs|--rsnap)
+			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")
+			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot")
+			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
+			export zbRECURSIVESNAPSHOT=1; zbNOXDEV="1"; zbFORCEXDEV="0"
 			;;
 		--server)		shift;	backupservers=(${=1//,/ });;
 		-p|--path)		shift;	zbPATH="$1";;
-		--pre)			shift;	zbPRECLIENT="$1";;
-		--pre@)			shift;	zbLNPRECLIENT="$1";;
-		--post)			shift;	zbPOSTCLIENT="$1";;
-		--post@)		shift;	zbLNPOSTCLIENT="$1";;
+		--pre)			shift;	zbPRECLIENT=($zbPRECLIENT "$1");;
+		--pre@)			shift;	zbLNPRECLIENT=($zbLNPRECLIENT "$1");;
+		--post)			shift;	zbPOSTCLIENT=($zbPOSTCLIENT "$1");;
+		--post@)		shift;	zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$1");;
 		-c|--check)		shift;	zbCHECK="$1";;
 		--check@)		shift;	zbLNCHECK="$1";;
 		-d|--dir)		shift;	zbSOURCENAME="$1";;
@@ -175,9 +187,9 @@ while [[ -n "$1" ]]; do
 		--inplace) 			zbFORCEINPLACE="1"; zbNOINPLACE="0";;
 		--compress) 			zbCOMPRESS="1"; zbNOCOMPRESS="0";;
 		--no-compress) 			zbNOCOMPRESS="1"; zbCOMPRESS="0";;
-		--compress-level)        shift;	zbCOMPRESSLEVEL="$1";;
-		--bwlimit)	         shift;	zbBWLIMIT="$1";;
-		--url)		         shift;	zbURL="$1";;
+		--compress-level)	shift;	zbCOMPRESSLEVEL="$1";;
+		--bwlimit)		shift;	zbBWLIMIT="$1";;
+		--url)			shift;	zbURL="$1";;
 		--fake-super)		export	zbFAKESUPER=1;;
 		--no-fake-super)	export	zbFAKESUPER=0;;
 		-o)			shift; zfsprops=($zfsprops[@] -o "$1");;
@@ -209,12 +221,10 @@ fi
 # the array contains at least one item (the empty string)
 for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell because we keep modifying inherited variables, but each iteration should see them as they were after command line processing
 
-	# we have to source the config here so that $BACKUPSERVER
-	# can be expanded in it where needed
+	# we have to source the config here so that $BACKUPSERVER can be expanded in it where needed
 	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-	# the user didn't specify -d, so auto-generate zbSOURCENAME (this is the intended usage)
-	if [[ -z "$zbSOURCENAME" ]]; then
+	if [[ -z "$zbSOURCENAME" ]]; then	# the user didn't specify -d, so auto-generate zbSOURCENAME (this is the intended usage)
 		temppath=$zbPATH	# zbPATH must be set here, because we error out earlier if neither --dir nor --path is supplied
 		if [[ "$zbPATH_IS_ZFS" = 1 ]]; then	
 			# if we were given the name of a zfs dataset it shouldn't start with a slash
@@ -292,7 +302,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	# At this point, zbSOURCENAME is an absolute path to a directory that exists.
 	# If it exists, the assumption is that we're supposed to re-initialize it with new defaults.
 
-	if [[ "$zbPATH_IS_ZFS" = 1 ]]; then
+	if ((zbPATH_IS_ZFS)); then	# explicitly specified to be zfs
 		if [[ -n "$zbPATH" ]]; then
 			echo "$zbPATH" > "$zbSOURCENAME/zfs-dataset"
 		elif ! [[ -r "$zbSOURCENAME/zfs-dataset" ]]; then
@@ -300,8 +310,14 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		else
 			zbPATH=$(<"$zbSOURCENAME/zfs-dataset")
 		fi
+		export zbZFSDATASET="$zbPATH"
+	elif [[ "$(findmnt -n -o TARGET "$zbPATH")" = "$zbPATH" ]] && [[ "$(findmnt -n -o FSTYPE "$zbPATH")" = "zfs" ]]; then
+		# happens to be zfs, and the backup starts at its root
+		export zbZFSDATASET="$(findmnt -n -o SOURCE "$zbPATH")"
+		export zbPATH_IS_ZFS="1"
+		[[ -e $zbSOURCENAME/zfs-dataset ]] || echo "$zbZFSDATASET" >$zbSOURCENAME/zfs-dataset
 	fi
-	
+
 	# we track what files we create, because command line options may request us to delete some of them afterwards
 	unset createdbyme
 	typeset -A createdbyme
@@ -336,14 +352,26 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		ln -ns "$zbBINDPATH" "$zbSOURCENAME"/path	# -n avoids creating symlink under path/, but may print a harmless error message if path exists already
 		ln -ns "$zbPATH" "$zbSOURCENAME"/realpath
 	else
-		[[ -n "$zbPATH" ]] && ln -ns "$zbPATH" "$zbSOURCENAME"/path
+		[[ "$zbPATH[1]" = / ]] && ln -ns "$zbPATH" "$zbSOURCENAME"/path
 	fi
 	
 	# since these were explicitly given by the user on the command line, they override whatever was there in the zbSOURCENAME dir before
-	[[ -n "$zbPRECLIENT" ]] && cp -a "$zbPRECLIENT" "$zbSOURCENAME"/pre-client
-	[[ -n "$zbLNPRECLIENT" ]] && ln -sf "$zbLNPRECLIENT" "$zbSOURCENAME"/pre-client
-	[[ -n "$zbPOSTCLIENT" ]] && cp -a "$zbPOSTCLIENT" "$zbSOURCENAME"/post-client
-	[[ -n "$zbLNPOSTCLIENT" ]] && ln -sf "$zbLNPOSTCLIENT" "$zbSOURCENAME"/post-client
+	if [[ -n "$zbPRECLIENT" ]]; then
+		mkdir -p $zbSOURCENAME/pre-client.d
+		cp -a $zbPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
+	fi
+	if [[ -n "$zbLNPRECLIENT" ]]; then
+		mkdir -p $zbSOURCENAME/pre-client.d
+		ln -sf $zbLNPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
+	fi
+	if [[ -n "$zbPOSTCLIENT" ]];
+		mkdir -p $zbSOURCENAME/post-client.d
+		cp -a $zbPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
+	fi
+	if [[ -n "$zbLNPOSTCLIENT" ]]; then
+		mkdir -p $zbSOURCENAME/post-client.d
+		ln -sf $zbLNPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
+	fi
 	[[ -n "$zbCHECK" ]] && cp -a "$zbCHECK" "$zbSOURCENAME"/check
 	[[ -n "$zbLNCHECK" ]] && ln -sf "$zbLNCHECK" "$zbSOURCENAME"/check
 	[[ -n "$zbUSERNAME" ]] && echo "$zbUSERNAME" >"$zbSOURCENAME"/username
@@ -352,6 +380,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
 	[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
 	[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
+	((zbRECURSIVESNAPSHOT)) echo 1 >$zbSOURCENAME/recursive-snapshot
 	flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
 	flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
 	flagfile "$zbNODELETEEXCLUDED" "$zbFORCEDELETEEXCLUDED" no-delete-excluded
@@ -366,7 +395,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
 	[[ -n "$zbBWLIMIT" ]] && echo "$zbBWLIMIT" >"$zbSOURCENAME"/bwlimit
 
-	# this fugly hack is apparently the only way to export an array
+	# this fugly hack is one of the ways to export an array (could also use newlines to separate elements, but since we're passing this to ssh, the quoting can actually be useful -- maybe we should even use (qq))
 	if [[ -n "$zfsprops" ]]; then
 		for i in {1..$#zfsprops}; do
 			zbZFSPROPS="$zbZFSPROPS ${(q)zfsprops[$i]}"
@@ -377,7 +406,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	if [[ -n "$MKSOURCE_D" ]] && [[ -d "$MKSOURCE_D/." ]]; then
 		export BACKUPSERVER zbFAKESUPER zbFORCEACLS zbFORCEXATTRS \
 			zbNOACLS zbNOXATTRS zbPATH zbPATH_IS_ZFS \
-			zbSOURCENAME zbURL zbUSERNAME zbZFSPROPS
+			zbSOURCENAME zbURL zbUSERNAME zbZFSPROPS zbZFSDATASET
 		run-parts -v -u $(umask) "$MKSOURCE_D"
 	fi
 ) done # for BACKUPSERVER in $backupservers[@]; do
