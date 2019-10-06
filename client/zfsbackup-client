@@ -4,53 +4,47 @@
 
 SOURCES=/etc/zfsbackup/sources.d
 DEFAULT_LOGFORMAT="%B %U:%G %M %l %o %i %C	%f%L"
-[[ -x /usr/bin/chpst ]] && lockprog="chpst"
+LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
+LOG_LEVEL_NAMES=(emerg alert crit err warning notice info debug)	# we also use these in syslog messages, so we have to use these specific level names
 
 # An array we'll put the names of the servers we're asked to back up to in.
 typeset -a backupservers BACKUPSERVERS
+typeset -A source_to_server # a hash whose keys are source names and whose values are servers names
+typeset -U sources_to_backup
 
 # we source the config once here, to seed the backupservers array
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-# copy config variable into internal one; BACKUPSERVERS will be overridden by
-# the config if we re-source it, which right now shouldn't be a problem, but
-# it's better to be safe than sorry.
+# The backupservers array will be overridden by servers specified on the command line; the all-capital BACKUPSERVERS array is specified in the config, which we re-source a number of times.
+# "backupservers" will default to the set of all configured servers:
 backupservers=($BACKUPSERVERS[@])
-[[ -z $backupservers[@] ]] && backupservers=("")
+[[ -z $backupservers[@] ]] && backupservers=("")	# maybe unnecessary -- make sure the array has at leas an empty element
 final_exit_status=0
 
 zmodload zsh/mapfile
 zmodload zsh/datetime
+zmodload zsh/system
 
-# Run args with a lock held
-function with_lock() {
-	case "$lockprog" in
-		chpst)
-			chpst -L "/var/lock/zfsbackup-client.${zbSOURCENAME//\//_}.lock" $@;;
-		"")
-			$@;;
-		*)
-			echo "$0: WARNING: unsupported lockprog '$lockprog'. Continuing without locking." >&2
-			$@;;
-	esac
-}
+me="zfsbackup-client"
 
-function get_sources() {	# TODO: perhaps the foreach loop over $backupservers should be in this function instead of the main program?
-	if [[ -n "$1" ]]; then
-		for i in "$@"; do
-			if [[ -d "$i/." ]]; then	# direct path (absolute or relative), use it
-				readlink -f "$i/."
-			elif [[ -d "$SOURCES/$i/." ]]; then	# maybe it's the name of a sources.d directory, relative to $SOURCES?
-				echo "$SOURCES/$i"
-			elif [[ -z "$BACKUPSERVER" ]]; then # support the case when a generic source name like "var" was passed on the command line and there are several servers
-				echo "$SOURCES/*/$i" # TODO: this is actually just a convention-based guess; we should really parse out the possible locations from the client.conf
-			fi
-		done
-	else
-		echo $SOURCES/*(/)
+function log() { # prints message on stderr and logs it to syslog; used by the main program, outside the subshells that process specific backup sources (which do their own stdout/stderr handling)
+	local level=$1
+	local level_index=${LOG_LEVEL_NAMES[(ie)$level]}
+	local stderr=''
+	shift
+	if ((${LOG_LEVEL_NAMES[(ie)$LOG_LEVEL]}>=level_index)); then
+		# only write to stderr if it's a pipe or a terminal, or if the message is an actual error; TODO: maybe make this configurable too? Have a separate STDERR_LOGLEVEL?
+		if [[ $(stat -Lc '%F' /dev/stderr) = fifo ]] || test -t 2 || [[ $level_index -le ${LOG_LEVEL_NAMES[(ie)err]} ]]; then
+			stderr=--stderr
+		fi
+		logger $stderr --tag "$me" --id=$$ --priority user.$level -- "$@"
 	fi
-	return 0
-}	
+}
+	
+function die() { # logs high-priority message, then exits the script with an error
+	log emerg "$@"
+	exit 111
+}
 
 function start_logger() {
 	# starts a logger coprocess if one doesn't exist already
@@ -58,8 +52,7 @@ function start_logger() {
 	have_logger=1
 }
 
-# fetches source related metadata from current directory and exports it in environment variables
-function update_metadata() {
+function update_metadata() { # fetches source related metadata from current directory and exports it in environment variables
 	if [[ -z "$preclient_exit" ]]; then # running for first time
 		export fsuuid=UNKNOWN; [[ -e fsuuid ]] && fsuuid=$(< fsuuid)
 		fstype=$(findmnt -n -o FSTYPE ./path/.) || fstype=UNKNOWN
@@ -87,187 +80,264 @@ function update_metadata() {
 	fi
 }
 
-if [[ "$1" == "--server" ]]; then
-	shift
-	backupservers=(${=1//,/ })
-	shift
-elif [[ -n "$1" ]]; then	# if we have were given the name(s) of sources.d directory/ies, the server is implicit, so don't iterate over servers defined in client.conf
-	backupservers=("")
-fi	# note: when given a mix of absolute and relative paths, the result is undefined
-
-# the array contains at least one item (the empty string if nothing else)
-for BACKUPSERVER in "$backupservers[@]"; do
-
-	export BACKUPSERVER	# make this available to pre-client and post-client scripts
+function process_source() { # handles backup of a single sources.d directory; calls itself for subjobs, if any
+	local zbSOURCENAME="$1"
 	# we have to source the config here so that $BACKUPSERVER
 	# can be expanded in it where needed
 	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
-	for zbSOURCENAME in $(get_sources "$@"); do # get_sources only returns absolute paths
-		export zbSOURCENAME # make this available to pre-client and post-client scripts
-		unset rsync_options
-		unset USER
-		unset preclient_exit preclientd_exit postclient_exit postclientd_exit
-		unset rsync_exit
-		echo "$0: INFO: processing $zbSOURCENAME." >&2
-		cd "$zbSOURCENAME" || {
-			echo "$0: WARNING: can't chdir to $zbSOURCENAME. Skipping." >&2
-			continue
-		}
-		[[ -r url ]] || {
-			echo "$0: ERROR: $zbSOURCENAME is missing url. Skipping." >&2
-			continue
-		}
-		url="$(head -n 1 url)"
-		[[ -r bwlimit ]] && rsync_options=($rsync_options --bwlimit="$(<bwlimit)")
-		[[ -e compress ]] && rsync_options=($rsync_options -z)
-		[[ -r compress-level ]] && rsync_options=($rsync_options --compress-level="$(<compress-level)")
-		[[ -r exclude ]] && rsync_options=($rsync_options --exclude-from="$(pwd)/exclude")
-		[[ -r files ]] && rsync_options=($rsync_options --files-from="$(pwd)/files")
-		[[ -r filter ]] && rsync_options=($rsync_options $(sed 's/^/--filter /' <filter))
-		[[ -r include ]] && rsync_options=($rsync_options --include-from="$(pwd)/include")
-		[[ -r log-file-format ]] && LOGFORMAT="$(<log-file-format)" || LOGFORMAT="$DEFAULT_LOGFORMAT"
-		{ [[ -e log-file ]] || [[ -L log-file ]] } && rsync_options=($rsync_options --log-file="$(readlink -f log-file)" --log-file-format="$LOGFORMAT")
-		[[ -e no-acls ]] || rsync_options=($rsync_options -A)
-		[[ -e no-delete ]] || rsync_options=($rsync_options --delete)
-		[[ -e no-delete-excluded ]] || rsync_options=($rsync_options --delete-excluded)
-		[[ -e no-hard-links ]] || rsync_options=($rsync_options -H)
-		[[ -e no-inplace ]] || rsync_options=($rsync_options --inplace)
-		[[ -e no-inplace ]] && ! [[ -e no-sparse ]] && rsync_options=($rsync_options -S)
-		[[ -e no-partial ]] || rsync_options=($rsync_options --partial)
-		[[ -e no-xattrs ]] || rsync_options=($rsync_options -X)
-		[[ -e no-xdev ]] || rsync_options=($rsync_options -x)
-		[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
-		[[ -r password ]] && rsync_options=($rsync_options --password-file="$(pwd)/password")
-		[[ -r timelimit ]] && timelimit=(timeout -k 5 "$(<timelimit)") || unset timelimit
-		[[ -r timeout ]] && rsync_options=($rsync_options --timeout="$(<timeout)") \
-			|| rsync_options=($rsync_options --timeout=3600)
-		[[ -r username ]] && export LOGNAME=$(head -n 1 username)
-		export rsync_options # make this available to pre-client and post-client scripts
-		( # subshell so that we can redirect stdout/stderr safely, as well as use 'exit'
-			export starttime=$EPOCHSECONDS
+	export zbSOURCENAME # make this available to pre-client and post-client scripts
+	local -a rsync_options
+	local USER
+	local preclient_exit preclientd_exit postclient_exit postclientd_exit
+	local rsync_exit ss_exit subsource_exit		# could use a hash to record the exit status of each sub-source spearately; would this be useful/necessary?
+	log info "processing $zbSOURCENAME."
+	cd "$zbSOURCENAME" || {
+		log warning "can't chdir to $zbSOURCENAME. Skipping."
+		return 2
+	}
+	[[ -r url ]] || {
+		log err "$zbSOURCENAME is missing url. Skipping." >&2
+		return 3
+	}
+	url="$(head -n 1 url)"
+	[[ -r bwlimit ]] && rsync_options=($rsync_options --bwlimit="$(<bwlimit)")
+	[[ -e compress ]] && rsync_options=($rsync_options -z)
+	[[ -r compress-level ]] && rsync_options=($rsync_options --compress-level="$(<compress-level)")
+	[[ -r exclude ]] && rsync_options=($rsync_options --exclude-from="$(pwd)/exclude")
+	[[ -r files ]] && rsync_options=($rsync_options --files-from="$(pwd)/files")
+	[[ -r filter ]] && rsync_options=($rsync_options $(sed 's/^/--filter /' <filter))
+	[[ -r include ]] && rsync_options=($rsync_options --include-from="$(pwd)/include")
+	[[ -r log-file-format ]] && LOGFORMAT="$(<log-file-format)" || LOGFORMAT="$DEFAULT_LOGFORMAT"
+	{ [[ -e log-file ]] || [[ -L log-file ]] } && rsync_options=($rsync_options --log-file="$(readlink -f log-file)" --log-file-format="$LOGFORMAT")	# TODO: check whether this works correctly with dangling symlinks
+	[[ -e no-acls ]] || rsync_options=($rsync_options -A)
+	[[ -e no-delete ]] || rsync_options=($rsync_options --delete)
+	[[ -e no-delete-excluded ]] || rsync_options=($rsync_options --delete-excluded)
+	[[ -e no-hard-links ]] || rsync_options=($rsync_options -H)
+	[[ -e no-inplace ]] || rsync_options=($rsync_options --inplace)
+	[[ -e no-inplace ]] && ! [[ -e no-sparse ]] && rsync_options=($rsync_options -S)
+	[[ -e no-partial ]] || rsync_options=($rsync_options --partial)
+	[[ -e no-xattrs ]] || rsync_options=($rsync_options -X)
+	[[ -e no-xdev ]] || rsync_options=($rsync_options -x)
+	[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
+	[[ -r password ]] && rsync_options=($rsync_options --password-file="$(pwd)/password")
+	[[ -r timelimit ]] && timelimit=(timeout -k 5 "$(<timelimit)") || unset timelimit
+	[[ -r timeout ]] && rsync_options=($rsync_options --timeout="$(<timeout)") \
+		|| rsync_options=($rsync_options --timeout=3600)
+	[[ -r username ]] && export LOGNAME=$(head -n 1 username)
+	export RSYNC_OPTIONS="${(F)rsync_options[@]}" # make this available to pre-client and post-client scripts; we do it this way because it's impossible to export arrays. Downstream scripts can get the array back using the syntax "rsync_options=(${(f)RSYNC_OPTIONS})", provided there are no meaningful newline characters in rsync_options (there shouldn't be).
+	( # subshell so that we can redirect stdout/stderr safely, as well as use 'exit'
+		local lockfile=url	# this file is known to exist; might as well use it as a lockfile. Might cause problems on read-only filesystems, but we'll cross that bridge when we get to it.
+		if ! zsystem flock -f lockfd -t 1 $lockfile; then
+			die "Can't lock $lockfile; another instance is probably already processing $zbSOURCENAME."
+		fi
 
-			update_metadata
+		export starttime=$EPOCHSECONDS
 
-			[[ -e stdout ]] && exec >stdout || { start_logger; exec >&p }
-			[[ -e stderr ]] && exec 2>stderr || { start_logger; exec 2>&p }
+		update_metadata
 
-# Lock usage is still slightly racy; for example, it's possible that pre-client will be run twice.
-# To avoid that, the entire subshell bit would have to be in a separate script.
-			if [[ -x check ]]; then
-				with_lock ./check
-				check_result="$?"
-				echo $check_result >check-exit-status	# TODO: maybe output files like this one should go to a subdirectory?
-				[[ "$check_result" = "0" ]] || {
-					echo "$EPOCHSECONDS CHECKFAILED_$check_result $zbSOURCENAME"
-					exit $check_result
-				}
-			fi
+		[[ -e stdout ]] && exec >stdout || { start_logger; exec >&p }
+		[[ -e stderr ]] && exec 2>stderr || { start_logger; exec 2>&p }
+
+		if [[ -x check ]]; then
+			./check
+			check_result="$?"
+			echo $check_result >check-exit-status	# TODO: maybe output files like this one should go to a subdirectory?
+			[[ "$check_result" = "0" ]] || {
+				echo "$EPOCHSECONDS CHECKFAILED_$check_result $zbSOURCENAME"
+				zsystem flock -u $lockfd
+				exit $check_result
+			}
+		fi
 
 # Not reached if check_result != 0
-			if [[ -x pre-client ]]; then
-				with_lock ./pre-client
-				preclient_exit="$?"
-				echo $preclient_exit >pre-client-exit-status
-			else
-				preclient_exit="0"
-			fi
-			if [[ -d pre-client.d ]]; then
-				with_lock run-parts --report ./pre-client.d
-				preclientd_exit="$?"
-				((preclient_exit+=preclientd_exit))
-				echo $preclientd_exit >pre-client.d-exit-status
-			else
-				preclientd_exit="0"
-			fi
+		if [[ -x pre-client ]]; then
+			./pre-client
+			preclient_exit="$?"
+			echo $preclient_exit >pre-client-exit-status
+		else
+			preclient_exit="0"
+		fi
+		if [[ -d pre-client.d/. ]]; then
+			run-parts --report ./pre-client.d
+			preclientd_exit="$?"
+			((preclient_exit+=preclientd_exit))
+			echo $preclientd_exit >pre-client.d-exit-status
+		else
+			preclientd_exit="0"
+		fi
 
-			update_metadata
-			if [[ -n "$snapshot_name" ]]; then
-				echo "$snapshot_name" >last-backed-up-snapshot-name
-				echo "$snapshot_created" >last-backed-up-snapshot-creation
-				touch --date @$snapshot_created last-backed-up-snapshot-creation
-			fi
+		update_metadata
+		if [[ -n "$snapshot_name" ]]; then
+			echo "$snapshot_name" >last-backed-up-snapshot-name
+			echo "$snapshot_created" >last-backed-up-snapshot-creation
+			touch --date @$snapshot_created last-backed-up-snapshot-creation
+		fi
 
-			if [[ "$preclient_exit" = "0" ]] && [[ "$preclientd_exit" = "0" ]]; then
-				[[ -f path ]] && mypath="$(head -n 1 path)"
-				[[ -f path ]] || mypath=path/.
-				if [[ -z "$mypath" ]]; then
+		if [[ "$preclient_exit" = "0" ]] && [[ "$preclientd_exit" = "0" ]]; then
+			# sub-sources must be processed before the parent source because this ensures that if the backup server creates a recursive snapshot at the end of the parent run, it'll include a consistent copy of the sub-filesystems as well.
+			if [[ -d "$zbSOURCENAME/subsources.d" ]]; then
+				subsource_exit=0
+				for subsource in "$zbSOURCENAME/subsources.d/"*(/N); do
+					process_source "${subsource:A}"
+					ss_exit=$?
+					if ((ss_exit)); then
+						echo "$0: WARNING: subsource ${subsource:A} exited with nonzero return code $ss_exit." >&2
+						((subsource_exit+=ss_exit))
+					fi
+				done
+			fi
+			[[ -f path ]] && mypath="$(head -n 1 path)"
+			[[ -f path ]] || mypath=path/.
+			if [[ -z "$mypath" ]]; then
 # this is an internal error that I want to be sure is logged (and we shouldn't run rsync with an empty $mypath).
-					echo "$0: FATAL: mypath variable was empty while processing $zbSOURCENAME." >&2
-					rsync_exit=111
-				else
-					for kludge in {1..10}; do	# switching to auto-mounted zfs snapshots doesn't always work on the first try on some kernels
-						cd "$mypath" && cdsuccess=1 && break
-						sleep 0.5
-					done
-					if [[ "$cdsuccess" = "1" ]]; then
-						with_lock $timelimit rsync -a $rsync_options[@] . "$url"
-						rsync_exit="$?"
-						echo $rsync_exit >"$zbSOURCENAME/rsync-exit-status"
-						if [[ "$rsync_exit" = 0 ]]; then
-							touch "$zbSOURCENAME/stamp-success"
-							rm -f "$zbSOURCENAME/stamp-failure" 2>/dev/null
-							if [[ -n "$snapshot_name" ]]; then
-								echo "$snapshot_name" >$zbSOURCENAME/last-successfully-backed-up-snapshot-name
-								echo "$snapshot_created" >$zbSOURCENAME/last-successfully-backed-up-snapshot-creation
-								touch --date @$snapshot_created $zbSOURCENAME/last-successfully-backed-up-snapshot-creation
-							fi
-						else
-							# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
-							echo "rsync returned $rsync_exit" >"$zbSOURCENAME/stamp-failure"
+				echo "$0: FATAL: mypath variable was empty while processing $zbSOURCENAME." >&2
+				rsync_exit=111
+			else
+				for kludge in {1..10}; do	# switching to auto-mounted zfs snapshots doesn't always work on the first try on some kernels
+					cd "$mypath" && cdsuccess=1 && break
+					sleep 0.5
+				done
+				if [[ "$cdsuccess" = "1" ]]; then
+					[[ -f "$zbSOURCENAME/no-recursive" ]] || rsync_options=($rsync_options --recursive)	# the no-recursive flag file can be created and removed dynamically by pre-client scripts; the point of performing a non-recursive backup of "." is to force a server-side snapshot to be created without traversing the (presumably unchanged) local fs
+					$timelimit rsync --links --perms --times --group --owner --devices --specials $rsync_options[@] . "$url"
+					rsync_exit="$?"
+					echo $rsync_exit >"$zbSOURCENAME/rsync-exit-status"
+					if [[ "$rsync_exit" = 0 ]]; then
+						touch "$zbSOURCENAME/stamp-success"
+						rm -f "$zbSOURCENAME/stamp-failure" 2>/dev/null
+						if [[ -n "$snapshot_name" ]]; then
+							echo "$snapshot_name" >$zbSOURCENAME/last-successfully-backed-up-snapshot-name
+							echo "$snapshot_created" >$zbSOURCENAME/last-successfully-backed-up-snapshot-creation
+							touch --date @$snapshot_created $zbSOURCENAME/last-successfully-backed-up-snapshot-creation
 						fi
 					else
-						echo "$0: FATAL: unable to chdir to $mypath." >&2
-						rsync_exit=111
+						# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
+						echo "rsync returned $rsync_exit" >"$zbSOURCENAME/stamp-failure"
 					fi
+				else
+					echo "$0: FATAL: unable to chdir to $mypath." >&2
+					rsync_exit=111
 				fi
-			else
-				: >"$zbSOURCENAME/stamp-failure"
-				((preclient_exit)) && echo "pre-client returned $preclient_exit" >>"$zbSOURCENAME/stamp-failure"
-				((preclientd_exit)) && echo "pre-client.d returned $preclient_exit" >>"$zbSOURCENAME/stamp-failure" 
 			fi
-			cd "$zbSOURCENAME"
-			if [[ -x post-client ]]; then
-				with_lock ./post-client "$preclient_exit" "$preclientd_exit" "$rsync_exit"
-				postclient_exit=$?
-				echo $postclient_exit >post-client-exit-status
-			else
-				postclient_exit=0
-			fi
-			if [[ -d post-client.d ]]; then
-				with_lock run-parts --report --arg "$preclient_exit" "$preclientd_exit" "$rsync_exit" post-client.d
-				postclientd_exit="$?"
-				((postclient_exit+=postlientd_exit))
-				echo $postclientd_exit >post-client.d-exit-status
-			else
-				postclientd_exit=0
-			fi
+		else
+			: >"$zbSOURCENAME/stamp-failure"
+			((preclient_exit)) && echo "pre-client returned $preclient_exit" >>"$zbSOURCENAME/stamp-failure"
+			((preclientd_exit)) && echo "pre-client.d returned $preclient_exit" >>"$zbSOURCENAME/stamp-failure"
+		fi
+		cd "$zbSOURCENAME"
+		if [[ -x post-client ]]; then
+			./post-client "$preclient_exit" "$preclientd_exit" "$rsync_exit" "$subsource_exit"
+			postclient_exit=$?
+			echo $postclient_exit >post-client-exit-status
+		else
+			postclient_exit=0
+		fi
+		if [[ -d post-client.d ]]; then
+			run-parts --report --arg "$preclient_exit" --arg "$preclientd_exit" --arg "$rsync_exit" --arg "$subsource_exit" post-client.d
+			postclientd_exit="$?"
+			((postclient_exit+=postlientd_exit))
+			echo $postclientd_exit >post-client.d-exit-status
+		else
+			postclientd_exit=0
+		fi
 
 # logging (will become inventory later)
-			update_metadata
-			echo -n "$EPOCHSECONDS "
-			if [[ $preclient_exit = 0 ]]; then
-				if [[ $rsync_exit = 0 ]]; then
-					echo -n "RSYNC_SUCCESS "
-				else
-					echo -n "RSYNC_FAIL_$rsync_exit "
-				fi
+		update_metadata
+		echo -n "$EPOCHSECONDS "
+		if [[ $preclient_exit = 0 ]]; then
+			if [[ $rsync_exit = 0 ]]; then
+				echo -n "RSYNC_SUCCESS "
 			else
-				echo -n "PRECLIENT_FAIL_$preclient_exit "
+				echo -n "RSYNC_FAIL_$rsync_exit "
 			fi
-			echo -n "$zbSOURCENAME "
-			echo -n "$fsuuid "
-			echo -n "$url "
-			echo -n "$fstype "
-			echo -n "$snapshot_name "
-			echo -n "$snapshot_created "
-			echo -n "$preclient_exit "
-			echo -n "$postclient_exit "
-			echo "$starttime"
-			echo $[rsync_exit+postclient_exit+postclientd_exit] >zfsbackup-client-exit-status
-			exit $[rsync_exit+postclient_exit+postclientd_exit]
-		)
-		((final_exit_status+=$?))
-	done # for zbSOURCENAME in $(get_sources $*); do
-done # for BACKUPSERVER in $backupservers[@]; do
+		else
+			echo -n "PRECLIENT_FAIL_$preclient_exit "
+		fi
+		echo -n "$zbSOURCENAME "
+		echo -n "$fsuuid "
+		echo -n "$url "
+		echo -n "$fstype "
+		echo -n "$snapshot_name "
+		echo -n "$snapshot_created "
+		echo -n "$preclient_exit "
+		echo -n "$postclient_exit "
+		echo "$starttime"
+		echo $[rsync_exit+postclient_exit+postclientd_exit] >zfsbackup-client-exit-status
+		zsystem flock -u $lockfd
+		exit $[rsync_exit+postclient_exit+postclientd_exit]
+	)
+	return $?
+}
+
+### main program ###
+# process --server argument(s) if any:
+if [[ "$1" == "--server" ]]; then
+	shift
+	backupservers=(${=1//,/ })
+	shift
+fi
+
+# process source specifications given on command line
+if [[ -n "$1" ]]; then
+	while [[ -n "$1" ]]; do
+		case "${1[1]}" in
+			/)	# absolute source name; work out whether it's under the sources.d root of one of the backupservers
+				sources_to_backup=($sources_to_backup[@] "$1")
+				if [[ -z "$BACKUPSERVERS" ]]; then	# only one, unnamed server
+					source_to_server[$1]=""
+				else	# there are named backupservers
+					for BACKUPSERVER in $backupservers[@]; do
+						[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf	# value of SOURCES can depend on BACKUPSERVER
+						if ! [[ "${1##$SOURCES}" = "$1" ]]; then	# if cutting of $SOURCES from the beginning of $1 yields anything but $1, then $1 begins with $SOURCES and $1 is a source that is backed up to $BACKUPSERVER
+							source_to_server[$1]=$BACKUPSERVER
+							break
+						fi
+					done
+				fi;;
+			*)	# relative source name; find all sources.d directories that have it
+				if [[ -z "$BACKUPSERVERS" ]]; then	# only one, unnamed server
+					if [[ -d "$1/." ]]; then
+						abspath="$(readlink -f $1/.)"
+						sources_to_backup=($sources_to_backup[@] "$abspath")
+						source_to_server[$abspath]=""
+					else
+						log warning "$1 is not a valid path to a backup source config directory. Skipping."
+					fi
+				else	# there are named backupservers
+					found=0
+					for BACKUPSERVER in $backupservers[@]; do
+						[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf	# value of SOURCES can depend on BACKUPSERVER
+						if [[ -d $SOURCES/$1/. ]]; then
+							abspath="$(readlink -f $SOURCES/$1/.)"
+							sources_to_backup=($sources_to_backup[@] "$abspath")
+							source_to_server[$abspath]=$BACKUPSERVER
+							found=1
+						fi
+					done
+					((found)) || log warning "$1 is not a valid path to a backup source config directory. Skipping."
+				fi;;
+		esac
+		shift
+	done
+else	# nothing on command line; back up everything
+	for BACKUPSERVER in $backupservers[@]; do
+		[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf	# value of SOURCES can depend on BACKUPSERVER
+		for i in $SOURCES/*(/); do
+			sources_to_backup=($sources_to_backup[@] $i)
+			source_to_server[$i]=$BACKUPSERVER
+		done
+	done
+fi
+
+[[ -z "$sources_to_backup[@]" ]] && exit 0	# nothing to do
+
+# loop over sources that need to be backed up
+for zbSOURCENAME in "$sources_to_backup[@]"; do
+
+	# make this available to pre-client and post-client scripts
+	export BACKUPSERVER=$source_to_server[$zbSOURCENAME]
+	process_source $zbSOURCENAME
+	((final_exit_status+=$?))
+done # for zbSOURCENAME in "$sources_to_backup[@]"; do
 exit $final_exit_status
