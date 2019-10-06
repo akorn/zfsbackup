@@ -1,0 +1,373 @@
+#!/bin/zsh
+#
+# This is a zfsbackup helper script that should be started from a zfsbackup
+# source config directory as a pre-client script.
+#
+# This script creates a snapshot of the filesystem to be backed up and mounts
+# it; or, if called with a numeric argument, it assumes it's been called as a
+# post-client script and unmounts/removes the snapshots it created. Eventually
+# it will support the following cases:
+#
+# 1. zfs instance.
+#
+#    Filesystem name in "zfs-dataset" file.
+#
+#    The snapshot will be called zpool/path/to/zfs/instance@<suffix>.
+#
+#    <suffix> defaults to zfsbackup-${BACKUPSERVER}-$EPOCHSECONDS if
+#    $BACKUPSERVER is not empty, and simply to 'zfsbackup-$EPOCHSECONDS' if it
+#    is. TODO: make this overridable.
+#
+#    Strictly speaking, the snapshot name doesn't need to contain anything like
+#    the date; only one ever needs to exist per filesystem and backup server.
+#    We can try to destroy it on startup, which will fail if it's still in use
+#    (but this shouldn't happen since zfsbackup-client ensures mutual exclusion;
+#    two instances can't process the same sources.d directory simultaneously).
+#
+#    However, it's actually useful to keep the last snapshot as long as the
+#    origin fs is not written to, so that the 'check-if-changed-since-snapshot'
+#    script can determine that this is the case. That's why we postfix the
+#    snapshot name with the epoch.
+#
+#    The "path" symlink will be manipulated to point to the snapshot.
+#
+#    This mechanism only works if the zfs instance is mounted.
+#
+# 2. zfs subtree.
+#
+#    Name of topmost filesystem in tree in "zfs-dataset" file.
+#
+#    "recursive-snapshot" should exist.
+#
+#    Optionally, "no-snapshot" can contain a list of (child) filesystems that
+#    should be excluded from the backup. This is implemented by snapshotting
+#    them as well initally ("zfs snapshot -r" doesn't make exceptions), but
+#    removing the snapshots immediately afterwards.
+#
+#    The snapshot will be called zpool/path/to/zfs/instance@<suffix>.
+#
+#    <suffix> is generated as above.
+#
+#    "path" should be a directory; the topmost snapshot will be bind mounted
+#    on it, with child snapshots bind mounted in appropriate places under it.
+#
+#    "no-xdev" should exist, otherwise rsync won't traverse the child
+#    filesystems.
+#
+#    This mechanism only backs up the zfs instances that are mounted.
+#
+# 3. zvol with arbitrary mountable filesystem. (TBD)
+#
+#    Volume name in "zvol" file.
+#
+#    The snapshot will be called zpool/path/to/zvol@<suffix>. In order to
+#    ensure snapshot visibility without having to set snapdev=visible (which
+#    may be undesirable if there are many snapshots), the snapshot will be
+#    immediately cloned. We'll mount the clone, not the snapshot itself.
+#    This also helps with journaling filesystems that need to write to the
+#    volume on mount.
+#
+#    <suffix> is generated as above.
+#
+#    The clone will be called zpool/<prefix>_<originalvolumename>_<suffix>.
+#
+# 4. LVM block device with arbitrary mountable filesystem. (TBD)
+#
+#    Volume pointed to by the "logicalvolume" symlink (it must point to
+#    /dev/vgname/lvname, not to /dev/mapper/vgname--lvname).
+#
+#    The size of the snapshot will be 100M but this can be overridden using
+#    the "snapsize" file.
+#
+#    The snapshot will be called <prefix>_<originalvolumename>_<suffix>.
+#last-successfully-backed-up-snapshot-creation
+#    <prefix> defaults to "snap" and can be overridden using the "snapprefix"
+#    file (which can also be empty).
+#
+#    <suffix> defaults to zfsbackup-${BACKUPSERVER} if $BACKUPSERVER is not
+#    empty, and simply to 'zfsbackup' if it is. TODO: make this overridable.
+#
+# In the last two cases, the snapshot will be mounted under the directory
+# "path" points to using '-o ro,noexec,nosuid,nodev' (also nouuid if the fs
+# is xfs).
+#
+# The default option set will inculde "acl" unless "no-acls" exists and
+# "user_xattr" unless "no-xattrs" exists.
+#
+# The mount options can be overridden using the "snapmountoptions" config file
+# (it should contain the full option string, e.g. "ro,noexec").
+# 
+# TODO: make sure exit status values are consistent and documented.
+# TODO: make sure error messages are consistent (mostly "ERROR" vs. "FATAL")
+# TODO: maybe refactor to reuse even more code among the 3 main cases
+
+LOG_LEVEL=${LOG_LEVEL:-debug}
+LOG_LEVEL_NAMES=(emerg alert crit err warning notice info debug)	# we also use these in syslog messages, so we have to use these specific level names
+LVM_DEFAULT_SNAPSHOT_SIZE=100M
+LVM_DEFAULT_SNAPSHOT_PREFIX=snap
+LVM_DEFAULT_SNAPSHOT_SUFFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
+ZFS_DEFAULT_SNAPSHOT_SUFFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
+
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -r /etc/zfsbackup/create-and-mount-snapshot.conf ]] && . /etc/zfsbackup/create-and-mount-snapshot.conf
+
+me="create-and-mount-snapshot:$(pwd)"
+
+function log() { # prints message on stderr and logs it to syslog; TODO: maybe also support a logfile?
+	local level=$1
+	local level_index=${LOG_LEVEL_NAMES[(ie)$level]}
+	shift
+	if ((${LOG_LEVEL_NAMES[(ie)$LOG_LEVEL]}>=level_index)); then
+		# echo "$me: $level: $@" >&2	# commented out because logger(1) with the --stderr flag also outputs to stderr
+		logger --stderr --tag "$me" --id=$$ --priority user.$level -- "$@"
+	fi
+}
+	
+function die() { # logs high-priority message, then exits the script with an error
+	log emerg "$@"
+	exit 111
+}
+
+function lvm_snapshot() {
+# TODO: test
+	local ret=0
+	[[ -d ./path/. ]] || die "$(pwd)/path is not a directory; aborting."
+	if [[ -L logicalvolume ]]; then
+		logicalvolume=$(readlink logicalvolume)
+	elif [[ -f logicalvolume ]]; then
+		logicalvolume="$(<logicalvolume)"
+	fi
+	vgname="${logicalvolume:h:t}"
+	snapparentpath="${logicalvolume:h}"
+	[[ -r snapsize ]] && snapsize="$(<snapsize)"; snapsize=${snapsize:-${LVM_DEFAULT_SNAPSHOT_SIZE:-100M}}
+	if [[ -r snapprefix ]]; then snapprefix="$(<snapprefix)"; else snapprefix="$LVM_DEFAULT_SNAPSHOT_PREFIX"; fi
+	if [[ -r snapmountoptions ]]; then
+		snapmountoptions="$(<snapmountoptions)"
+	else
+		snapmountoptions="ro,noexec,nosuid,nodev"
+		[[ -e "no-acls" ]] || snapmountoptions="$snapmountoptions,acl"
+		[[ -e "no-xattrs" ]] || snapmountoptions="$snapmountoptions,user_xattr"
+	fi
+	suffix=$LVM_DEFAULT_SNAPSHOT_SUFFIX
+	snapname="${snapprefix:+${snapprefix}_}${logicalvolume}${suffix:+_${suffix}}"
+	[[ $snapname = $logicalvolume ]] && die "The name of the snapshot must be different from the name of the volume. Adjust snapprefix and/or LVM_DEFAULT_SNAPSHOT_PREFIX and/or LVM_DEFAULT_SNAPSHOT_SUFFIX."
+	if mountpoint -q path; then
+		umount -R path || die "Can't umount $(pwd)/path."
+	fi
+	if [[ -b $snapparentpath/$snapname ]]; then
+		((postclient)) || log info "Previous snapshot exists; attempting to remove."
+		lvremove --force $snapparentpath/$snapname
+		ret=$?
+		if [[ $ret -gt 0 ]] && ! ((postclient)); then
+			die "lvremove $snapparentpath/$snapname returned an error. Can't continue."
+		fi
+	fi
+	((postclient)) && return $ret	
+	lvcreate -s -L "$snapsize" -n "$snapname" "$logicalvolume"
+	ret_lvcreate=$?
+	if ! [[ "$ret_lvcreate" = 0 ]]; then
+		die 'lvcreate -s -L "$snapsize" -n "$snapname" "$logicalvolume" returned an error  ($ret_lvcreate).'
+	fi
+	if ! [[ -r snapmountoptions ]]; then
+		fstype="$(findmnt -n -o FSTYPE "$blockdev")"
+		[[ "$fstype" = xfs ]] && snapmountoptions="$snapmountoptions,nouuid"
+	fi
+	mount "$snapparentpath/$snapname" "$(pwd)/path" -o "$snapmountoptions"
+	ret_mount=$?
+	[[ "$ret_mount" = 0 ]] && return 0
+	log crit "'mount \"$snapparentpath/$snapname\" \"$(pwd)/path\" -o \"$snapmountoptions\"' failed with status $ret_mount."
+	log notice "Mounting failed; attempting to remove '$blockdev'."
+	lvremove --force "$snapparentpath/$snapname"
+	return $ret_mount
+}
+
+function zvol_snapshot() {
+# TODO this is just copypasted old code, needs review/rewrite TODO
+	die "zvol snapshot creation and mounting is not currently implemented"
+	abort_unless_path_exists # doesn't return on error
+	zvol="$(<zvol)"
+	zpool="${zvol/\/*/}"
+#	initvars
+	snapparentpath="/dev/$zpool"
+	abortifprevsnapexists	# TODO: test existence of both snapshot and clone
+	snapname="$zvol@$suffix"
+	clonename="${snapprefix:+${snapprefix}_}${zvol}_${suffix}"
+	zfs snapshot "$snapname"
+	ret_snapshot=$?
+	if [[ "$ret_snapshot" = 0 ]]; then
+		zfs clone "$snapname" "$zpool/$clonename"
+		ret_clone=$?
+		if [[ "$ret_clone" = 0 ]]; then
+			echo "$clonename" >snapname	# we must write the clonename here because abortifprevnsapexists() wouldn't necessarily see the snap device under /dev (e.g. due to snapdev=hidden)
+			if try_mount "$snapparentpath/$clonename"; then
+				exit 0
+			else
+				zfs destroy "$zpool/$clonename"
+				zfs destroy "$snapname"
+				exit 3
+			fi
+		else
+			echo "$0: FATAL: 'zfs clone \"$snapname\" \"$zpool/$clonename\"' failed with status $ret_clone. Will try to destroy $snapname and abort." >&2
+			zfs destroy "$snapname"
+			exit 5
+		fi
+	else
+		echo "$0: FATAL: 'zfs snapshot \"$snapname\"' failed with status $ret_snapshot. Aborting." >&2
+		exit 4
+	fi
+}
+
+function zfs_snapshot() {
+# TODO: test
+	local ret=0 snap
+	zfsdataset="$(<zfs-dataset)"
+	[[ -L path ]] || die "$(pwd)/path is not a symlink."
+	if ! ((postclient)); then
+		zfs_mounted="$(zfs get -Hp -o value mounted "$zfsdataset")"
+		[[ "$zfs_mounted" = no ]] && die "$zfsdataset is not mounted. Aborting."
+		zfs_mp="$(zfs get -Hp -o value mountpoint "$zfsdataset")"
+		if [[ "$zfs_mp" = legacy ]]; then	# we don't need to test for 'none' because that would've caused the zfs_mounted test above to fail
+			die "Filesystems with legacy mountpoints are not supported yet."
+		fi
+	fi
+	suffix=$ZFS_DEFAULT_SNAPSHOT_SUFFIX
+	if ((postclient)); then
+		# we want to keep the current snapshot for the benefit of the check-if-changed-since-snapshot script and only destroy any earlier zfsbackup snasphots
+		zfs list -t snap -r $zfsdataset -Hp -o name -s creation | fgrep @$suffix | sed '$d' | while read snap; do	# the sed command removes the last line, keeping the youngest snapshot(s)
+			log debug "destroying $snap."
+			zfs destroy $snap
+			((ret+=$?))
+		done
+		return $ret
+	fi
+	# not reached in postclient case
+	suffix="$suffix-$EPOCHSECONDS"
+	snapname="$zfsdataset@$suffix"
+	if zfs get -H -o value type "$snapname" >/dev/null 2>/dev/null; then
+		log info "$snapname exists; attempting to destroy."
+		zfs destroy $snapname	# technically, this is racy -- maybe the snapshot existed above but no longer exists now?
+		ret=$?
+		if [[ $ret -gt 0 ]] && zfs get -H -o value type "$snapname" >/dev/null 2>/dev/null; then	# if we lost a race above, the snapshot won't exist here anymore
+			die "zfs destroy $snapname returned an error. Can't continue."
+		fi
+	fi
+	zfs snapshot "$snapname"
+	ret_snapshot=$?
+	if [[ "$ret_snapshot" = 0 ]]; then
+		for i in {1..5}; do # This needs to be retried a few times because of some timing issue on some kernels
+			# switch to the directory to force it to become mounted
+			pushd "$zfs_mp/.zfs/snapshot/$suffix/." && popd && break
+			sleep 0.5
+		done
+		if [[ -d "$zfs_mp/.zfs/snapshot/$suffix/." ]]; then
+			if [[ -e path ]]; then
+				rm path || die "Failed to remove old 'path' symlink from $(pwd)."
+			fi
+			ln -sf "$zfs_mp/.zfs/snapshot/$suffix" path || die "Failed to make '$(pwd)/path' a symlink to '$mp/.zfs/snapshot/$suffix'."
+		else
+			die "$zfs_mp/.zfs/snapshot/$suffix doesn't exist anymore; maybe we lost a race with a snapshot remove operation."
+		fi
+		return 0
+	else
+		die "'zfs snapshot \"$snapname\"' failed with status $ret_snapshot. Aborting."
+	fi
+}
+
+function recursive_zfs_snapshot() {
+# TODO: test; add EPOCHSECONDS to suffix (as above)
+	local -a zfs_instances temparray nosnapshot
+	local -A zfs_mp
+	local OLDIFS="$IFS"
+	local IFS="
+"
+	local ret=0
+	local final_ret=0
+	
+	zfsdataset="$(<zfs-dataset)"
+	[[ -e no-xdev ]] || { ((postclient)) || log warn "You're requesting recursive zfs snapshots but don't have no-xdev in $(pwd). This appears nonsensical; are you sure it is what you want?" }
+	[[ -d path ]] || die "$(pwd)/path is not a directory."
+	[[ -r no-snapshot ]] && nosnapshot=($(<no-snapshot))
+	zfs_instances=($(zfs list -r -t filesystem -H -o name $zfsdataset))
+	if mountpoint -q path; then	# It's impossible we're running concurrently with another backup job because zfsbackup-client enforces mutual exclusion; thus this is safe even in pre-client, and handles cases where post-client wasn't run
+		umount -R path
+		((final_ret+=$?))
+	fi
+# first destroy any existing snapshots that will get in the way of the new recursive snapshot
+	for i in $zfs_instances[@]; do
+		snapname="$i@$ZFS_DEFAULT_SNAPSHOT_SUFFIX"
+		if zfs get -H -o value type "$snapname" >/dev/null 2>/dev/null; then
+			((postclient)) || log info "$snapname exists; attempting to destroy."
+			zfs destroy $snapname
+			ret=$?
+			if [[ $ret -gt 0 ]] && ! ((postclient)); then
+				die "zfs destroy $snapname returned an error. Can't continue." # in the post-client case, we still try to destroy the other snapshots even if destroying one failed
+			fi
+			((final_ret+=ret))
+		fi
+		((postclient)) && continue # the rest is not relevant for post-client
+# now, add filesystems that are not mounted, or whose mountpoint is not under the mountpoint of our subtree root, to the nosnapshot array
+		zfs_mounted="$(zfs get -Hp -o value mounted "$i")"
+		if [[ "$zfs_mounted" = no ]]; then
+			log info "$i is not mounted. We won't include it in the backup."
+			nosnapshot=($nosnapshot[@] $i)
+		fi
+		zfs_mp[$i]="$(zfs get -Hp -o value mountpoint "$i")"
+		if [[ "$zfs_mp[$i]" = legacy ]]; then
+			log info "Filesystems with legacy mountpoints are not supported yet; we won't include $i in the backup."
+			nosnapshot=($nosnapshot[@] $i)
+		fi
+		[[ -z "$zfs_topmost_mp" ]] && zfs_topmost_mp=$zfs_mp
+		if [[ $zfs_mp[$i] = ${zfs_mp[$i]##$zfs_topmost_mp} ]]; then	# We try to cut off "zfs_topmost_mp" from the beginning of zfs_mp; if the result is the unchanged zfs_mp, then the mountpoint of this fs is not under our topmost mountpoint and we skip it.
+			log info "$i is mounted unter '$zfs_mp[$i]', which is not under '$zfs_topmost_mp'; we won't include $i in the backup."
+			nosnapshot=($nosnapshot[@] $i)
+		fi
+	done
+	((postclient)) && return $final_ret	# we're done unmounting and removing, so return
+	suffix=$ZFS_DEFAULT_SNAPSHOT_SUFFIX
+	snapname="$zfsdataset@$suffix"
+	zfs snapshot -r "$snapname"
+	ret_snapshot=$?
+	if [[ "$ret_snapshot" = 0 ]]; then
+		for i in $nosnapshot[@]; do
+			zfs destroy $i@$suffix
+		done
+		zfs_instances=(${zfs_instances:|nosnapshot})
+		for i in $zfs_instances[@]; do
+			log debug "Trying to get $i@$suffix mounted in $zfs_mp[$i]/.zfs/snapshot/$suffix/."
+			for x in {1..5}; do # This needs to be retried a few times because of some timing issue on some kernels
+				# switch to the directory to force it to become mounted
+				pushd "$zfs_mp[$i]/.zfs/snapshot/$suffix/." && popd && log debug "$i@$suffix successfully mounted in $zfs_mp[$i]/.zfs/snapshot/$suffix/." && break
+				sleep 0.5
+			done
+			if ! mount --bind $zfs_mp[$i]/.zfs/snapshot/$suffix/. $(pwd)/path/${zfs_mp[$i]##$zfs_topmost_mp}; then
+				log crit "'mount --bind $zfs_mp[$i]/.zfs/snapshot/$suffix/. $(pwd)/path/${zfs_mp[$i]##$zfs_topmost_mp}' returned an error. Trying to roll back mount."
+				umount -R $(pwd)/path/.
+				die "Failed to recursively mount the snapshots of $zfsdataset."
+			fi
+		done
+		return 0 # we treated previous errors as fatal, so if we're here, everything is fine
+	else
+		die "'zfs snapshot \"$snapname\"' failed with status $ret_snapshot. Aborting."
+	fi
+	IFS="$OLDIFS"
+}
+
+zmodload zsh/datetime
+
+postclient=0
+[[ "$1" = <-> ]] && postclient=1	# if $1 is a number, we're being called as a post-client script
+[[ "${0:t}" = umount-and-destroy-snapshot ]] && postclient=1	# the name is also a strong hint
+
+if [[ -e logicalvolume ]]; then # this is case #4 explained above.
+	lvm_snapshot
+elif [[ -r zvol ]]; then # this is case #3
+	zvol_snapshot
+elif [[ -r recursive-snapshot ]]; then # this is case #2
+	recursive_zfs_snapshot
+elif [[ -r zfs-dataset ]]; then # this is case #1
+	[[ -e no-xdev ]] && die "no-xdev exists and you're requesting a non-recursive snapshot. This is probably not what you want; exiting."
+	zfs_snapshot
+else
+	die "Neither of 'logicalvolume', 'zvol' or 'zfs-dataset' exist in $(pwd). Don't know what to do; aborting."
+fi
+exit $?
