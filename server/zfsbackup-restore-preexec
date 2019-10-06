@@ -1,0 +1,206 @@
+#!/bin/zsh
+#
+# Part of "zfsbackup" (https://github.com/akorn/zfsbackup). Copyright (c) András Korn, 2019. License: GPLv3
+#
+# Purpose: make it easier and friendlier to retrieve earlier backups from a zfsbackup server.
+# Called as an rsync pre-xfer script, this script populates the directory pointed to be $RSYNC_MODULE_PATH with a set of directories that correspond to snapshots of a zfs instance (given either on the command line or in a config file).
+# The directories are named after the snasphots; the script also creates symlinks to the directories; the names of the symlinks are the snapshots' creation dates (both in human-readable and in epoch second format). (TODO: do something sensible of two snapshots were created in the same second. Currently, the 2nd symlink is just not created.)
+# If the user tries to download from one of the directories (or symlinks), the corresponding snapshot is bind-mounted under the pertinent directory. If there are sub-filesystems that have the same snapshot, those are also bind-mounted in the appropriate subdirectory of the main bind mount.
+# Additionally, the client can request paths of the form /before-somedate/ and /after-somedate/; in these cases the pre-xfer script finds the latest snapshot from before "somedate" (or the earliest one after "somedate") and binds mounts it as above, creating a symlink to it with the name the client requested. "Somedate" can be anything "date --date" understands; for example, "/after-last tuesday/" or "/before/2017-01-01/". However, slashes are not allowed in the date.
+#
+# There is a corresponding post-xfer script that unmounts these bind mounts.
+#
+# NOTE: RSYNC_MODULE_PATH should *not* be the directory the backups go to. It should be an empty directory, perhaps even on a tmpfs. It's fine if it doesn't exist; this script will try to create it.
+#
+# No matter what we do, this can never be made race-free if we want to do the mounting on demand: a lock obtained in pre-xfer exec doesn't persist through the transfer, so that we could end up unmounting part of a tree that's in use by a transfer started later.
+# The only way for this mechanism to be safe for concurrent clients is to have the snapshots bind mounted *all the time*, which, while not totally unfeasible, increases complexity. In reality, it would be very rare to have several clients restore backups from the same module concurrently, so that just setting 'max connections = 1' in the rsync module declaration is the better solution.
+#
+
+typeset -A snapcreation	# key: snapshot name; value: creation date in epoch seconds
+typeset -U usable_snapshots
+
+function bindmount_recursive() { # populates a directory with bind mounts of restorable system directories or snapshots
+	local dest=$1
+	local snapname=$2
+	local mp
+	local subtree_root
+	if [[ -d $dest/. ]]; then
+		umount -R $mp # since 'max clients = 1', this is safe; if the directory is already a mountpoint, that's because a previous rsync instance died without running the post-xfer script to do the unmounting.
+		subtree_root=$(zfs get -H -o value mountpoint $zfs_dataset)
+		zfs list -t filesystem -r -H -o canmount,name,mountpoint $zfs_dataset \
+			| sed -n '/^on/s/^on[[:space:]]*//p' \
+			| perl -e 'print sort { length($a) <=> length($b) } <>' | uniq \
+			| while read name mp; do
+				if ! [[ $mp = ${mp#$subtree_root} ]]; then	# if the mountpoint starts with $subtree_root
+					if ! mount --bind $mp/.zfs/snapshot/$snapname/. $dest${mp#$subtree_root}/.; then
+						umount -R $dest
+						return 1
+					fi
+				else
+					continue	# skip this fs, its mountpoint is outside our subtree
+				fi
+			done
+	else
+		return 1	# destination directory doesn't exist
+	fi
+}
+
+function enumerate_snapshots() { # Populates usable_snapshots array and snapcreation hash
+	local snapname creation fsname snapshot_eligible
+	zfs list -d 1 -t snap -Hp -o name,creation $zfs_dataset \
+		| cut -d@ -f2- \
+		| while read snapname creation; do
+			snapshot_eligible=1	# will be set to zero if some child filesystems don't have this snapshot
+			# check whether all child filesystems also have this snapshot
+			# this could be racy if cron were running in the meantime and could remove snapshots; we'll just have to live with that
+			zfs list -t filesystem -r -H -o name $zfs_dataset \
+				| while read fsname; do
+					if zfs get -H name -o value $fsname@$snapname 2>/dev/null >/dev/null; then
+						continue # joy, the snapshot exists
+					else
+						snapshot_eligible=0
+						break
+					fi
+				done
+			if ((snapshot_eligible)); then
+				usable_snapshots=($usable_snapshots $snapname)
+				snapcreation[$snapname]=$creation
+			fi
+		done
+}
+
+function create_snapdirs() {
+	enumerate_snapshots
+	existing_subdirs=(*(/N))
+	to_remove=(${existing_subdirs:|usable_snapshots})
+	[[ -n "$to_remove[@]" ]] && rmdir "$to_remove[@]"
+	symlinks -d . 2>/dev/null
+	mkdir -p "$usable_snapshots[@]"
+	for i in ${(k)snapcreation}; do
+		[[ -e $snapcreation[$i] ]] || ln -sT $i $snapcreation[$i]
+		friendlydate=$(strftime %F_%H:%M:%S $snapcreation[$i])
+		touch -d @$snapcreation[$i] $i
+		[[ -e $friendlydate ]] || ln -sT $i $friendlydate
+	done
+	rm -f latest
+	ln -sT $(ls -1rtd *(/) | tail -1) latest
+}
+
+function parse_date() {	# side effect: sets $targetdate to requested date as specified by the user; $targetepoch to the same in epoch seconds; and $lookfor to "after" or "before"
+	case "$1" in
+		after-*) 	targetdate=${1#after-}; lookfor=after;;
+		before-*)	targetdate=${1#before-}; lookfor=before;;
+		*)	return 1;;
+	esac
+	# make sure target date is sane
+	if [[ $targetdate =~ / ]]; then
+		echo "You can't have a slash in your target date. Maybe use ISO8601 dates?"
+		exit 1	# ensure the message gets shown to the client
+	fi
+	if targetepoch=$(chpst -u nobody date --date "$targetdate" +%s); then
+		return 0
+	else
+		return 1
+	fi
+}
+
+function find_and_mount_snapshot() {	# uses $targetepoch, $targetdate and $lookfor
+	local d dirs
+	case $lookfor in
+		after)	dirs=($(ls -r1td *(/)))
+			for d in $dirs; do
+				[[ $snapcreation[$d] -gt $targetepoch ]] && break
+			done
+			if [[ $snapcreation[$d] -gt $targetepoch ]]; then
+				bindmount_recursive $d $d || return 1
+				ln -sT $d ./after-$targetepoch
+				ln -sT $d ./after-$targetdate	# $targetdate is sane; parse_date() said so
+				return 0
+			else
+				return 1	# didn't find snapshot later than target date
+			fi;;
+		before)	dirs=($(ls -1td *(/)))
+			for d in $dirs; do
+				[[ $snapcreation[$d] -lt $targetepoch ]] && break
+			done
+			if [[ $snapcreation[$d] -lt $targetepoch ]]; then
+				bindmount_recursive $d $d || return 1
+				ln -sT $d ./after-$targetepoch
+				ln -sT $d ./before-$targetdate	# $targetdate is sane; parse_date() said so
+				return 0
+			else
+				return 1	# didn't find snapshot later than target date
+			fi;;
+	esac
+	# not reached
+	return 42
+}
+
+CONFIG="/etc/zfsbackup/restore-snaphot/$RSYNC_MODULE_NAME"
+
+mkdir -p $RSYNC_MODULE_PATH || exit 1
+
+[[ -n "$1" ]] && [[ "$(zfs get -H -o value name)" = "$1" ]] && zfs_dataset="$1"
+
+[[ -e "$CONFIG" ]] && . "$CONFIG"	# can override $zfs_dataset. TODO: make recursive bind mounting optional (but probably still default)
+
+if ! [[ -v zfs_dataset ]]; then	# neither the "$1" logic nor the config gave us a $zfs_dataset
+	echo "$0: This rsync module is unconfigured. Can't continue."	# will be shown to client
+	exit 1
+fi
+
+if ! cd $RSYNC_MODULE_PATH; then
+	echo "$0: can't cd to $RSYNC_MODULE_PATH. Aborting."
+	exit 1
+fi
+
+zmodload zsh/datetime
+zmodload zsh/system
+
+create_snapdirs
+
+touch "NOTE: you can also use names like 'after-<somedate>' for the earliest backup after the given date, or 'before-<somedate>' for the latest one before the given date."
+touch "NOTE: all the directories you see in the root of this rsync module are empty and will only have contents if you reference them explicitly from a client."
+
+#
+# RSYNC_REQUEST contains a list of requested files/directories that can have unquoted spaces in their names, making it impossible in general to get a list of specific requested paths.
+# Example: RSYNC_REQUEST='modulename/a modulename/b modulename/c d modulename/e'
+# One might think that "modulename/" can be used to detect where a path begins, but "modulename" can also occur as a directory name inside the module, so that doesn't work either.
+# We have to use the RSYNC_ARG# pseudo-array instead.
+i=0
+mode=opts	# Minimal state machine. We need to process rsync options first; the end of option is signaled by an array element with the value "."; the rest are paths.
+while :; do
+	rsync_arg=RSYNC_ARG$i
+	rsync_args=($rsync_args "$rsync_arg=${(P)rsync_arg}")	# we only collec these in an array so we can print the array later for debugging
+	((i++))
+	case $mode in
+		opts)	[[ ${(P)rsync_arg} = . ]] && mode=paths;;	# the . signals the end of options; next RSYNC_ARG is already a path, sans module name
+		paths)	if [[ -v $rsync_arg ]]; then
+				request_paths=($request_paths "${(P)rsync_arg}")
+			else
+				break
+			fi;;
+	esac
+done
+
+# debug messages
+#echo -E "rsync_args: ${(q-)rsync_args[@]}" >&2
+#echo -E "request_paths: ${(q-)request_paths[@]}" >&2
+
+for req_dir in $request_paths[@]; do
+	req_dir=${req_dir%/}	# strip tailing slash if any
+	req_dir=${req_dir#/}	# strip leading slash if any
+	if [[ -L $req_dir ]]; then
+		# mount latest snapshot under directory pointed to by symlink
+		snapname=$(readlink $req_dir)
+		bindmount_recursive ${snapname:t} ${snapname:t}
+	elif [[ -d "$req_dir" ]]; then
+		bindmount_recursive $req_dir $req_dir
+	elif parse_date "$req_dir"; then
+		find_and_mount_snapshot
+	else
+		echo "Invalid directory specified (nonexistent snapshot or invalid date)." >&2
+		continue
+	fi
+done
+exit 0
