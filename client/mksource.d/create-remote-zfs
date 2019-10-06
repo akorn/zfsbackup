@@ -46,8 +46,6 @@ echo "Run the following command on ${BACKUPSERVERNAME:-your backup server} to cr
 echo -n "$YELLOW"zfs create -p ${=xattrs} ${=acltype} $zbZFSPROPS "$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}"
 if [[ "$zbFAKESUPER" = "1" ]] || { [[ -z "$zbFAKESUPER" ]] && [[ "$FAKESUPER" = "true" ]] }; then
 	echo
-	echo "chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}' $NO_COLOR"
-else
-	echo "$NO_COLOR"
+	echo "chown $BACKUPOWNER '/$REMOTEBACKUPPOOL/$REMOTEBACKUPPATH/${zbSOURCENAME:t}'"
 fi
-echo
+echo "$NO_COLOR\n"
