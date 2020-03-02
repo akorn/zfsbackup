@@ -1,8 +1,11 @@
 This directory can be used as a template for /etc/rsyncd on the zfsbackup
 server.
 
-It includes a Makefile to auto-generate an rsyncd.conf based on the contents
-of conf.d/.
+It includes a `Makefile` to auto-generate an rsyncd.conf based on the contents
+of conf.d/. The alternative approach is to have `&include conf.d` in `rsyncd.conf`.
+
+The `Makefile` won't overwrite an `rsynd.conf` that has such an `&include`
+line.
 
 Suggested layout of conf.d/: top level directory should contain files that
 make up the global section of rsyncd.conf. You can (and should) use
@@ -10,3 +13,10 @@ subdirectories to group rsync modules; at the very least, have one subdir
 per client, and in each of those directories, one file per filesystem (with
 both the backup and restore module in it). You can make the structure as
 deep as you want (e.g. have hostgroups, or groups of fileystems, whatever).
+
+Be aware, though, that the `&include` keyword is not recursive; if you use
+several levels of directories, you need a file in each to include the
+contents of subdirectories.
+
+On the whole, using a `make`-generated config file is more convenient unless
+your config directory is flat.
