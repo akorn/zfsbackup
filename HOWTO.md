@@ -34,12 +34,16 @@ FAKESUPER=true # or false if you want to run the remote rsyncd as root and save 
 If you have more than one backup server, use something like:
 
 ```zsh
-# if a server tag is set via the command line, $BACKUPSERVER will contain it,
-# so that the client.conf file can reference it:
-#
-# An array we'll put the names of the servers we're asked to back up to in.
-# zfsbackup-create-source and zfsbackup-client use this.
-BACKUPSERVERS=(server1 [ server2 [ server3 [ ... ] ] ])	
+# This array contains the nicknames (not necessarily hostnames) of the backup
+# servers we back up to. Scripts that source this configuration will, if
+# necessary, iterate over its elements and re-source this configfile with
+# $BACKUPSERVER set to the current element.
+BACKUPSERVERS=(server1 [ server2 [ server3 [ ... ] ] ])
+# One way of having per-server configuration is to rely on the $BACKUPSERVER
+# variable, like this:
+[[ -r /etc/zfsbackup/client-$BACKUPSERVER.conf ]] && . /etc/zfsbackup/client-$BACKUPSERVER.conf
+# Another way is to reference $BACKUPSERVER in variable assignments, like in
+# the examples below:
 # Path to sources.d directories:
 SOURCES=/etc/zfsbackup/sources.d${BACKUPSERVER:+/$BACKUPSERVER}
 # Path to scripts shipped with zfsbackup:
@@ -65,7 +69,7 @@ FAKESUPER=true
 # Where to create mountpoints for, and mount, directories to backup if we're using
 # bind mounts to back them up including stuff hidden under mountpoints. This setting
 # is used at zfs-create-source time.
-BINDROOT=/mnt${BACKUPSERVER:+/$BACKUPSERVER}
+BINDROOT=/mnt/zfsbackup${BACKUPSERVER:+/$BACKUPSERVER}
 # An array of zfs properties you want set on newly created zfs instances,
 # if any (note that currently there is no way to override these from the
 # command line; maybe instead of setting them here, you should let them
@@ -119,7 +123,7 @@ The output will look like this:
 run-parts: executing /etc/zfsbackup/mksource.d/create-remote-zfs
 Run the following command on your backup server to create the zfs instance we'll back /etc/zfsbackup/sources.d/rootfs up to:
 zfs create -o dedup=on -o korn.zfsbackup:minsize=314572800 -o korn.zfsbackup:mininodes=100000 backup/REMOTEBACKUPPATH/rootfs
-chown nobody:nogroup '/backup/REMOTEBACKUPPATH/rootfs' 
+chown nobody:nogroup '/backup/REMOTEBACKUPPATH/rootfs'
 
 run-parts: executing /etc/zfsbackup/mksource.d/create-rsyncd-conf
 Please append something like the following to the rsyncd.conf on backup.hostname:
@@ -230,6 +234,19 @@ Obtain a list of (zfs) filesystems that don't have backups configured:
 ```
 zfs get -o name,property all -t filesystem,volume -s inherited | fgrep korn.zfsbackup:config | sed 's/[[:space:]]*korn.zfsbackup:config.*//'
 ```
+
+## Backing up servers that run LXC containers
+
+I set up LXC containers in a very specific way and wrote a script to configure up backups for all of them.
+
+Assumptions in case you also want to use my script:
+
+ * All the lxc stuff lives under the a somepool/path zfs dataset.
+ * All lxc guests have filesystems like `somepool/path/guest`, `somepool/path/guest/rootfs`, `somepool/path/guest/rootfs/{tmp,var}`, `somepool/path/guest/rootfs/{srv,srv/somedata}`.
+ * You want to back up an LXC guest in a single go, using a recursive ZFS snapshot to obtain a consistent state.
+ * You want similar sub-filesystems to be created on the backup server (separate `rootfs`, `rootfs/var` mounted under it, and os on).
+  * This makes restoring from the latest backup very straightforward but still allows e.g. different dedup settings for `rootfs` and `rootfs/var`.
+  * Note that restoring from earlier backup snapshots will only be possible either on a per-filesystem basis, or by using bind mounts to create the appropriate hierarchy of mountpoints, constructed from the snapshots, on the backup server.
 
 ## Scheduling backups
 
