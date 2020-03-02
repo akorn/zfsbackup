@@ -13,6 +13,16 @@ MININODES=7
 IMAGE_DEFAULT="zfsbackup-NAMEPREFIX-%Y-%m-%d-%H%M"
 PROPPREFIX="korn.zfsbackup"
 
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+
+. $DEFAULT_FUNCTIONS
+[[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+[[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+
+me="${0:t}[rsync$RSYNC_PID]"
+
 # The following function can be overridden in the config as well as by
 # supplying a /etc/zfsbackup/server.d/$RSYNC_MODULE_NAME script that takes
 # "expires" or "nameprefix" as its first argument. The 2nd argument is 1 if
@@ -119,26 +129,15 @@ strftime      "%Y-%m-%d %Y   %m    %d  %G          %V   %j        %u        %H  
 
 [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
 
-[[ -z "$RSYNC_MODULE_PATH" ]] && {
-	echo "${0:t}[$RSYNC_PID]: FATAL: RSYNC_MODULE_PATH is unset. Exiting." >&2
-	exit 1
-}
-[[ -z "$RSYNC_MODULE_NAME" ]] && {
-	echo "${0:t}[$RSYNC_PID]: WARNING: WTF. RSYNC_MODULE_NAME is unset. Continuing regardless, but this should not happen." >&2
-}
+[[ -z "$RSYNC_MODULE_PATH" ]] && die "RSYNC_MODULE_PATH is unset. Exiting."
+[[ -z "$RSYNC_MODULE_NAME" ]] && log warning "WTF. RSYNC_MODULE_NAME is unset. Continuing regardless, but this should not happen."
 
-mountpoint -q "$RSYNC_MODULE_PATH" || {
-	echo "${0:t}[$RSYNC_PID]: ERROR: $RSYNC_MODULE_PATH is not a mountpoint. This is not supported." >&2
-	exit 1
-}
+mountpoint -q "$RSYNC_MODULE_PATH" || die "$RSYNC_MODULE_PATH is not a mountpoint. This is not supported."
 
-df --portability -t zfs "$RSYNC_MODULE_PATH" >/dev/null 2>/dev/null || {
-	echo "${0:t}[$RSYNC_PID]: ERROR: $RSYNC_MODULE_PATH is not zfs. This is not supported." >&2
-	exit 1
-}
+df --portability -t zfs "$RSYNC_MODULE_PATH" >/dev/null 2>/dev/null || die "$RSYNC_MODULE_PATH is not zfs. This is not supported."
 
 # Obtain dataset name
-df --portability -t zfs "$RSYNC_MODULE_PATH" | tail -n 1 | read origin rest
+df --portability -t zfs "$RSYNC_MODULE_PATH" | tail -n 1 | read origin rest	# TODO: use findmnt instead
 
 # Construct snapshot name and properties
 unset properties
@@ -154,13 +153,13 @@ actualsize="$(zfs get -Hp -o value lrefer "$origin")"
 df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
 if [[ "$minsize" -gt 0 ]]; then
 	if [[ "$actualsize" -lt "$minsize" ]]; then
-		echo "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize. Setting partial=1." | logger -s -t "${0:t}/$$" -p user.warning
+		log warning "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize. Setting partial=1."
 		partial=1
 	fi
 fi
 if [[ "$mininodes" -gt 7 ]]; then
 	if [[ "$actualinodes" -lt "$mininodes" ]]; then
-		echo "Actual inodes of $RSYNC_MODULE_PATH is $actualinodes, less than $mininodes. Setting partial=1." | logger -s -t "${0:t}/$$" -p user.warning
+		log warning "Actual inodes of $RSYNC_MODULE_PATH is $actualinodes, less than $mininodes. Setting partial=1."
 		partial=1
 	fi
 fi
@@ -184,8 +183,8 @@ expires_readable="$(strftime "%Y-%m-%d %H:%M:%S" $expires)"
 properties=($properties -o ${PROPPREFIX}:expires="$expires")
 properties=($properties -o ${PROPPREFIX}:expires-readable="$expires_readable")
 
-echo "${0:t}[$RSYNC_PID]: transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) finished (exit status $RSYNC_EXIT_STATUS)." >&2
-echo "${0:t}[$RSYNC_PID]: Running zfs snapshot $@ $properties[@] $snapname" >&2
+log notice "transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) finished (exit status $RSYNC_EXIT_STATUS)."
+log info "Running zfs snapshot $@ $properties[@] $snapname"
 zfs snapshot $@ $properties[@] "$snapname" >&2
 
 if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
@@ -196,8 +195,8 @@ if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
 				| at -t $(strftime "%Y%m%d%H%M.%S" "$expires")
 		else
 # TODO: actually, at(1) may be anywhere in the PATH.
-			echo "${0:t}[$RSYNC_PID]: ERROR: can't schedule atjob without /usr/bin/at." >&2
+			log err "can't schedule atjob without /usr/bin/at."
 		fi
 	fi
 fi
-echo "${0:t}[$RSYNC_PID]: backup job completed." >&2
+log notice "${0:t}[$RSYNC_PID]: backup job completed."
