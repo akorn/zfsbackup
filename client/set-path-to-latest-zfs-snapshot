@@ -4,42 +4,37 @@
 #
 # Only supports case where zfs-dataset is a mounted zfs instance. TODO: support zvols
 
-#coproc logger -p daemon.notice -t set-path-to-latest-zfs-snapshot
-#exec >&p
-#exec 2>&p
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+. $DEFAULT_FUNCTIONS
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+me="${0:t}:$(pwd)"
 
 myfs="${1:-$(head -n 1 zfs-dataset)}"
 mp=$(zfs get -Hp -o value mountpoint "$myfs")
 [[ "$mp[1]" = "/" ]] || {
 	grep "^$myfs " /proc/mounts | read foo mp foo
 }
-mountpoint -q "$mp/." || {
-	echo "$0: ERROR: the supposed mountpoint of '$myfs', '$mp', is not a mountpoint." >&2
-	exit 1
-}
-[[ -d "$mp/.zfs/snapshot/." ]] || {
-	echo "$0: ERROR: '$mp/.zfs/snapshot/.' doesn't exist." >&2
-	exit 2
-}
+
+mountpoint -q "$mp/." || die "the alleged mountpoint of '$myfs', '$mp', is not a mountpoint."
+[[ -d "$mp/.zfs/snapshot/." ]] || die "'$mp/.zfs/snapshot/.' doesn't exist."
 zfs list -d 1 -t snapshot -H -o name -S creation ${myfs} | head -n 1 | read snapshot
 snapshot="$(echo "$snapshot" | sed 's/[^@]*@//')"
-for i in {1..5}; do # This needs to be retried a few times because of some timing issue
+
+for i in {1..5}; do # With some kernel versions, this needs to be retried a few times because of some timing issue
 	pushd "$mp/.zfs/snapshot/$snapshot/." # switch to the directory to force it to become mounted
 	popd && break
 	sleep 0.5
 done
+
 if [[ -d "$mp/.zfs/snapshot/$snapshot/." ]]; then
 	if [[ -e path ]]; then
-		rm path || {
-			echo "$0: ERROR: failed to remove old 'path' symlink. Perhaps it's a real directory?" >&2
-			exit 3
-		}
+		rm path || die "failed to remove old 'path' symlink. Perhaps it's a real directory?"
 	fi
-	ln -sf "$mp/.zfs/snapshot/$snapshot" path || {
-		echo "$0: ERROR: failed to make 'path' a symlink to '$mp/.zfs/snapshot/$snapshot'." >&2
-		exit 4
-	}
+	ln -sf "$mp/.zfs/snapshot/$snapshot" path \
+		|| die "failed to make 'path' a symlink to '$mp/.zfs/snapshot/$snapshot'."
 else
-	echo "$0: ERROR: $mp/.zfs/snapshot/$snapshot doesn't exist anymore; maybe we lost a race with a snapshot remove operation." >&2
-	exit 5
+	die "$mp/.zfs/snapshot/$snapshot doesn't exist anymore; maybe we lost a race with a snapshot remove operation."
 fi
