@@ -27,7 +27,7 @@ I chose to still write `zfsbackup` for the following reasons:
  * With `rsync` clients (who can even be non-root users) can be enabled to autonomously restore their own files from backup with arbitrary granularity (from a single file to everything) without needing shell access on the backup server.
  * When I began working on `zfsbackup`, it wasn't possible (at least with zfsonlinux) to override zfs properties while receiving a stream; this meant, for example, that if the fs being received had a mountpoint of `/`, it would be mounted over the root directory of the receiving box, or not at all.
  * With `zfsbackup`, every backup is both full and incremental:
-   * full in the sense that you don't need to keep any previous backup in order to be able to recover the most recent state;
+   * full in the sense that you don't need to keep any previous backup in order to be able to recover the most recent state (or any particular past state);
    * incremental in the sense that a new backup only needs to transfer as much data as has changed since the last backup, and will only need this amount of storage space.
  * Achieving the above with `zfs send` requires tight coupling between the client and the server:
    * The client needs to make sure it keeps (a `zfs bookmark` of) the last snapshot it transferred to the server, so that it can produce an incremental stream relative to it on the next backup. (This can be done with `zfs hold`/`zfs release`.)
@@ -38,7 +38,7 @@ I chose to still write `zfsbackup` for the following reasons:
 ## Reference Manual
 
 See `HOWTO.md` for quick start instructions; the information presented below
-is intended as a reference.
+is intended more as a reference.
 
 The `zfsbackup` system consists of the following macroscopic components:
 
@@ -46,9 +46,9 @@ The `zfsbackup` system consists of the following macroscopic components:
  2. Client-side configuration. There are some global config items, and each backup job has its own configuration. Typically you'd have one backup job per origin filesystem and backup server; e.g. "back up `/home` to `server1` would be one job. `zfsbackup` calls these jobs "sources".
  3. An `rsync` server with zfs storage.
  4. Server side scripts:
-   * There is one (to be called by `rsync`) that creates a snapshot when a backup transfer completes, setting various zfs properties.
-   * Another one looks for expired snapshots of backups and removes them.
-   * Another one provides a client with a virtual view of all existing backup snaphots, which can be downloaded from via `rsync`.
+   * `make-snapshot`, to be called by `rsync`, creates a snapshot when a backup transfer completes, setting various zfs properties.
+   * `zfsbackup-expire-snapshots` looks for expired snapshots of backups and removes them.
+   * `zfsbackup-restore-preexec` provides a client with a virtual view of all existing backup snaphots, which can be downloaded from via `rsync`.
  5. Some client-side mechanism that schedules backups (two solutions are provided: one for `cron`, one for `runit` or similar service supervisors).
 
 ### Client side
@@ -218,12 +218,16 @@ This configuration should work for the single-server as well as for the
 multi-server case.
 
 ```zsh
-# if a server tag is set via the command line, $BACKUPSERVER will contain it,
-# so that the client.conf file can reference it:
-#
-# An array we'll put the names of the servers we're asked to back up to in.
-# zfsbackup-create-source and zfsbackup-client use this.
-BACKUPSERVERS=(server1 [ server2 [ server3 [ ... ] ] ])	
+# This array contains the nicknames (not necessarily hostnames) of the backup
+# servers we back up to. Scripts that source this configuration will, if
+# necessary, iterate over its elements and re-source this configfile with
+# $BACKUPSERVER set to the current element.
+BACKUPSERVERS=(server1 [ server2 [ server3 [ ... ] ] ])
+# One way of having per-server configuration is to rely on the $BACKUPSERVER
+# variable, like this:
+[[ -r /etc/zfsbackup/client-$BACKUPSERVER.conf ]] && . /etc/zfsbackup/client-$BACKUPSERVER.conf
+# Another way is to reference $BACKUPSERVER in variable assignments, like in
+# the examples below:
 # Path to sources.d directories:
 SOURCES=/etc/zfsbackup/sources.d${BACKUPSERVER:+/$BACKUPSERVER}
 # Path to scripts shipped with zfsbackup:
@@ -247,15 +251,12 @@ FAKESUPER=true
 # Where to create mountpoints for, and mount, directories to backup if we're using
 # bind mounts to back them up including stuff hidden under mountpoints. This setting
 # is used at zfs-create-source time.
-BINDROOT=/mnt/zfsbackup
+BINDROOT=/mnt/zfsbackup${BACKUPSERVER:+/$BACKUPSERVER}
 # An array of zfs properties you want set on newly created zfs instances,
 # if any (note that currently there is no way to override these from the
 # command line; maybe  instead of setting them here, you should let them
 # be inherited from the parent fs on the server):
 #DEFAULT_ZFS_PROPERTIES=(-o exec=off -o suid=off -o devices=off)
-# You might want to use something like:
-#. /etc/zfsbackup/client.conf${BACKUPSERVER:+.$BACKUPSERVER}
-# to override some of the above on a per-server basis.
 ```
 
 #### Semi-automatic creation of sources.d directories
@@ -328,6 +329,9 @@ directory being backed up).
 -rs --rsnap	Install create-and-mount-snapshot as a pre-client script;
 		create recursive snapshot of the zfs instance given in -p.
 		Implies --no-xdev. Installs appropriate post-client script too.
+		As of now, recursive snapshot support is most useful for
+		backups with no-xdev, where an entire client-side zfs subtree is
+		backed up to a single server-side filesystem.
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).
 		Use only -d if you're reconfiguring an existing sources.d dir.
@@ -419,7 +423,7 @@ When backing something like this up, the following features are desirable:
 Without sub-sources you could go about it this way:
 
  * Have a single `sources.d` directory on the client for the entire subtree.
-   * Use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
+   * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
    * Don't set up separate write-only rsync modules for the lower elements of the hierarchy on the server; use `no-xdev` on the client to traverse the entire subtree.
  * Create separate filesystems on the backup server and arrange them in the same hierarchy they're in on the client (TODO: write a helper script for this.)
  * Make sure the backupserver creates a recursive snapshot when the backup of the topmost directory is finished (add `-r` to the `make-snapshot` command line in `post-xfer exec`).
@@ -430,10 +434,11 @@ Without sub-sources you could go about it this way:
 *With* sub-sources, it's not much simpler, but perhaps more intuitive:
 
  * Have a single `sources.d` directory on the client for the entire subtree.
-   * Use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
+   * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
    * *Do* set up separate write-only rsync modules for the lower elements of the hierarchy on the server; *don't* use `no-xdev` on the client (so that it backs up each fs separately).
    * Create a sub-source for each member fs in a hierarchy that matches the real fs hierarchy. (TODO: write a helper script for this.)
-   * Symlink the `check-if-changed-since-snapshot` pre-client script into all your pertinent `sources.d` directories.
+   * Symlink the `check-if-changed-since-snapshot` pre-client script into all your pertinent `sources.d` directories, including the sub-sources.
+   * TODO: implement a mechanism to force sub-sources to back up a specific snapshot (one just created recursively from the topmost dataset).
  * Create separate filesystems on the server and arrange them in the same hierarchy they're in on the client (TODO: write a helper script for this).
  * Make sure the backupserver creates a recursive snapshot when the backup is finished (add `-r` to the `make-snapshot` command line in `post-xfer exec`).
  * Set up a separate sources.d-style directory and an accompanying server-side rsync module for `/lxc/guest1/rootfs/home` (and any other filesystems you want to be able to back up separately); in the client-side directory, put a check script that returns 1 if it's not run interactively (or if a specific environment variable is not set, or something), so that this backup job is not triggered during the scheduled runs but can be triggered manually.
@@ -446,6 +451,7 @@ hierarchy over rsync. This can be done as follows:
  * In fact, this script takes arbitrary dates, and finds the latest snapshot that predates or postdates them, then mounts it in a dynamically created directory. E.g. `rsync://server/module/after-last\ tuesday` works.
  * Optionally, amend the `remove-snapshot-if-allowed` script so it knows about recursive snapshots and removes all member snapshots at the same time (TODO).
  * Use the `zfsbackup-restore-postexec` `post-xfer exec` script that removes these bind mounts once they're no longer in use. Unfortunately, this can't be made safe for concurrent transfers; you have to set `max connections = 1` in the rsync module config.
+   * You'd think that it would be possible to create a separate directory for each client based on `RSYNC_PID`, which `rsyncd` passes to the scripts it calls, but alas, no: the directory `rsyncd` presents to the client is always the one specified in the module definition.
 
 ### Client side zfs properties
 
@@ -463,7 +469,8 @@ backed up (to $BACKUPSERVER if there are several servers).
 "none" means that this fs is not backed up. I set this property explicitly
 on all filesystems that don't need to be backed up; so whenever it is
 inherited I can see that something that maybe should get backed up is not. A
-list of suspicious filesystems can be obtained with
+list of suspicious filesystems that might need backups but don't have any
+can be obtained with
 
 ```
 zfs get -o name,property all -t filesystem,volume -s inherited | fgrep korn.zfsbackup:config | sed 's/[[:space:]]*korn.zfsbackup:config.*//'
@@ -595,18 +602,20 @@ If you want snapshots and auto-expiry, you'll want to include something like
 post-xfer exec = /path/to/zfsbackup/make-snapshot
 ```
 
-in `rsyncd.conf`. This script runs
-`/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME` if it exists. The per-module
-script will be passed the word "expires" as the first and only argument. It is
-expected to output a date in unix epoch seconds (`date +%s`). The snapshot
-will be kept until this time and an `at(1)` job scheduled to remove it if
-`at(1)` is available. The snapshot will have its `korn.zfsbackup:expires`
-property set to the expiry date. If no
+in `rsyncd.conf`. The `make-snapshot` script runs
+`/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME` if that exists, allowing its
+behaviour to be extended. This `/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME`
+per-module script will be passed the word "expires" as the first and only
+argument. It is expected to output a date in unix epoch seconds (`date +%s`).
+
+The snapshot of the just-finished backup will be kept until this time and
+an `at(1)` job scheduled to remove it if `at(1)` is available. The snapshot
+will have its `korn.zfsbackup:expires` property set to the expiry date. If no
 `/etc/zfsbackup/server.d/$RSYNC_MODULE_NAME` script is provided, internal
 defaults are used (heuristics based on day of week, day of month, day of
-year). These can be overridden in
-`/etc/zfsbackup/server.conf` (see the `make-snapshot` script to get an idea
-how). Expiry can be set to "never" to never expire a snapshot.
+year). These can be overridden in `/etc/zfsbackup/server.conf` (see the
+`make-snapshot` script to get an idea how). Expiry can be set to "never" to
+never expire a snapshot.
 
 Because the `at` job may not be run (for example, if the server is off), the
 cronjob `zfsbackup-expire-snapshots` is provided. It looks for zfs snapshots
@@ -614,8 +623,8 @@ that have the `korn.zfsbackup:expires` property and removes any that are
 expired. Future versions may support scoping (only expire snapshots under a
 specific zpool or subtree).
 
-No expiry takes place if the only or the latest successful backup would be
-removed.
+No expiry takes place if a snapshot of the only or of the latest successful
+backup would be removed.
 
 The `/etc/zfsbackup/server.conf` and the `/etc/zfsbackup/client.conf` file can
 be used to override the `korn.zfsbackup` property prefix to something else,
@@ -732,6 +741,23 @@ as follows:
    * Alternatively, no separate rsync modules for metadata might be needed; instead, the client would first transfer the real data, then the metadata in a separate transfer. The server would parse the metadata, delete it from the backup fs, then create the snapshot. Advantage: no rsync module pollution. Disadvantage: messes with the backup data, even if only temporarily.
    * Messing with the backup data would be "safe" by default in the sense that the metadata would never make it into a snapshot: if it's uploaded but a snapshot is not taken, the next transfer would delete it by default (since `rsync` would be run with `--delete`). However, unusual configurations could make it unsafe; thus it's not a good idea after all.
 
+Another possibility would be to introduce `pre-server.d` and `post-server.d`
+on the client, which could then run commands via `ssh` on the server. The
+obvious disadvantage is that the client then needs a shell account on the
+server; however, that could also be used to transfer backups (with
+`fake super`) over ssh.
+
+Additionally, a regular `post-client` script could also use ssh, or any
+other non-rsync mechanism to transmit data to the server, e.g. http;
+or commit something to a revision control system; or whatever. Heck, we
+could even leverage `finger`. :)
+
+An issue with `post-server.d` is that some scripts might need to run before
+`post-client`, others after it; ending up with `post-post-client-server.d`
+and `pre-post-client-server.d` would be bad. There really isn't much benefit
+to introducing explicit `post-server.d` directories; the scripts could just
+as well go in `post-client.d`.
+
 ### post-xfer exec and restores
 
 `rsyncd` doesn't care whether the client uploads or downloads data (or both);
@@ -794,4 +820,4 @@ as long as there are few contributors.
 
 `zfsbackup` was originally written by András Korn
 <korn-zfsbackup @AT@ elan.rulez.org> in 2012. Development continued
-in small bursts through 2019 and possibly beyond (see git changelog).
+in small bursts through 2020 and possibly beyond (see git changelog).
