@@ -22,7 +22,7 @@
 # stamp-failure file in the sources.d/sourcename directory), the script
 # retries all failed backups in random order until they all succeed, or
 # until a configurable amount of time (by default, 24 hours -- MAX_RUNTIME)
-# has passed since the last time zfsbackup-client was run.  Once this time
+# has passed since the first time zfsbackup-client was run.  Once this time
 # is reached, the script exits.  (At this point it will either be restarted
 # by runit, causing zfsbackup-client to be run again, or it can be started
 # again by cron.)
@@ -44,22 +44,35 @@ EXIT_ACTION=sleep-and-exit	# can also be stop-service or just exit
 EXIT_SLEEP_UNTIL=22:00	# if set, sleep until this time before exiting
 EXIT_SLEEP_FIXED=18h	# if EXIT_SLEEP_UNTIL is unset, sleep this
 			# amount of time before exiting
-VERBOSE=1		# setting to 0 suppresses informational messages to stderr
-MAX_RUNTIME=86400	# maximum number of seconds since zfsbackup-client run;
-			# if we exceed this, the script aborts
+LOG_LEVEL=info		# possible levels: emerg alert crit err warning notice info debug
+MAX_RUNTIME=86400	# maximum number of seconds since first zfsbackup-client run as
+			# part of this scheduled job; if we exceed this while
+			# retrying failed backups, the script aborts
 LOADWATCH_HIGH=100	# what system load level to suspend backup processes at
 LOADWATCH_LOW=10	# what system load level to resume suspended
 			# backup processes at
-CHRT=(chrt -i 0)	# used as a command prefix; the default runs the backup
-			# with the SCHED_IDLE scheduler, reducing its priority.
+CHRT=(chrt -i 0
+nice -n 19)		# used as a command prefix; the default runs the backup
+			# with the SCHED_IDLE scheduler at nice 19, reducing its priority.
 SOURCES=/etc/zfsbackup/sources.d
 
+USE_SYSLOG=0
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+. $DEFAULT_FUNCTIONS
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+
+me=$SVNAME
 
 zmodload zsh/datetime
 
 [[ -r "$CONFIG" ]] && . "$CONFIG"
 
+if ((verbose)); then	# the old behaviour was to print informational messages if VERBOSE=1; translate that to a log level of at least info now (only debug would be higher)
+	[[ $LOG_LEVEL = debug ]] || LOG_LEVEL=info
+fi
+	
 function error_exit() { # doesn't return
 	case "$EXIT_ACTION" in
 		stop-service)	exec sv d "$SVDIR" ;;
@@ -73,8 +86,8 @@ function sleep_and_exit() { # doesn't return
 		delay=$[$(date --date "$EXIT_SLEEP_UNTIL" '+%s')-EPOCHSECONDS]
 		[[ "$delay" -lt 0 ]] && delay="$[$(date --date "tomorrow $EXIT_SLEEP_UNTIL" '+%s')-EPOCHSECONDS]"	# the given time is already past today
 		[[ "$delay" -gt "$maxdelay" ]] && delay=$maxdelay
-		[[ "$delay" -lt 0 ]] && { echo "Ooops, we're behind schedule, zfsbackup-client should already be running; exiting" >&2; exit 2 }
-		[[ "$VERBOSE" = 0 ]] || echo "Sleeping until $(date --date now\ +\ $delay\ seconds)." >&2
+		[[ "$delay" -lt 0 ]] && { log notice "Ooops, we're behind schedule, zfsbackup-client should already be running; exiting"; exit 2 }
+		log info "Sleeping until $(date --date now\ +\ $delay\ seconds)."
 		exec sleep $delay
 	else
 		exec sleep $EXIT_SLEEP_FIXED
@@ -88,7 +101,7 @@ if [[ -n "$SLEEP_IF_NOT_UP_FOR_MORE_THAN" ]]; then
 	UP_FOR_SECS=$(cut -d' ' -f1 /proc/uptime)
 	if [[ "$UP_FOR_SECS" -le "$SLEEP_IF_NOT_UP_FOR_MORE_THAN" ]] && [[ -n "$ONBOOT_SLEEP" ]]; then
 		[[ $ONBOOT_SLEEP[$#ONBOOT_SLEEP] =~ [[:digit:]] ]] && PRINT_ONBOOT_SLEEP="$ONBOOT_SLEEP seconds" || PRINT_ONBOOT_SLEEP="$ONBOOT_SLEEP"
-		[[ "$VERBOSE" = 0 ]] || echo "It seems we booted recently (uptime is $UP_FOR_SECS seconds), sleeping $PRINT_ONBOOT_SLEEP." >&2
+		log info "It seems we booted recently (uptime is $UP_FOR_SECS seconds), sleeping $PRINT_ONBOOT_SLEEP." >&2
 		sleep "$ONBOOT_SLEEP"
 	fi
 fi
@@ -100,38 +113,36 @@ else
 fi
 $CHRT $loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]"
 cd $SOURCES || {
-	echo "FATAL: can't chdir to $SOURCES." >&2
+	log crit "can't chdir to $SOURCES."
 	error_exit
 }
 
 flag_fail=1
 
-while [[ $flag_fail = 1 ]]; do
+while ((flag_fail)); do
 	failure_stamps=(*/stamp-failure(N))
-	if [[ -n "$failure_stamps[@]" ]]; then
-		failed_sources=(${failure_stamps:h})
-		for source in $(echo "$failed_sources[@]" | tr ' ' '\n' | sort -R); do
-			if [[ "$[EPOCHSECONDS-ZFSBACKUP_TIME]" -gt "$MAX_RUNTIME" ]]; then
-				echo "MAX_RUNTIME exceeded; exiting so zfsbackup-client can be run again." >&2
-				exit 2
-			else
-				sleep $[RANDOM%29+1]
-				[[ "$VERBOSE" = 0 ]] || echo "Retrying $source." >&2
-				[[ -f "$source/stderr" ]] && {
-					echo "stderr output from last $source run:" >&2
-					cat "$source/stderr" >&2
-				}
-				$CHRT $loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]" "$source"
-			fi
-		done
-	else
-		flag_fail=0
-	fi
+	flag_fail=$#failure_stamps
+	((flag_fail)) || break	# no failures, skip rest of loop
+	failed_sources=(${failure_stamps:h})
+	for source in $(echo "$failed_sources[@]" | tr ' ' '\n' | sort -R); do
+		if [[ "$[EPOCHSECONDS-ZFSBACKUP_TIME]" -gt "$MAX_RUNTIME" ]]; then
+			log notice "MAX_RUNTIME exceeded; exiting so zfsbackup-client can be run again."
+			exit 2
+		else
+			sleep $[RANDOM%29+1]
+			log info "Retrying $source."
+			[[ -f "$source/stderr" ]] && {
+				log info "Dumping stderr output from last $source run onto own stderr."
+				cat "$source/stderr" >&2
+			}
+			$CHRT $loadwatch zfsbackup-client "$ZFSBACKUP_CLIENT_ARGS[@]" "$source"
+		fi
+	done
 done
 
 case "$EXIT_ACTION" in
 	stop-service)	exec sv d "$SVDIR" ;;
 	exit)		exit 0 ;;
 	sleep-and-exit)	sleep_and_exit ;;
-	*)		echo "Unknown EXIT_ACTION '$EXIT_ACTION'. Aborting." >&2; exit 111 ;;
+	*)		die "Unknown EXIT_ACTION '$EXIT_ACTION'. Aborting.";;
 esac
