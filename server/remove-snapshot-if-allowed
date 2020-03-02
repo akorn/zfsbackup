@@ -5,16 +5,22 @@
 # successful backup.
 
 DESTROYLOCK=/var/lock/korn.zfsbackup.zfs.destroy.lock
+LOCKTIMEOUT=600
 PROPPREFIX=korn.zfsbackup
 
-function exec_destroy() {
-	echo "destroying expired snapshot $1" | logger --id -t "zfsbackup: "
-	if [[ -x $(which chpst) ]]; then
-		exec chpst -l "$DESTROYLOCK" zfs destroy -d "$1"
-	else
-		exec zfs destroy -d "$1"
-	fi
-}
+LOG_LEVEL=warning
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+
+. $DEFAULT_FUNCTIONS
+[[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+[[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+
+me="${0:t}${1:+:$1}"
+
+zmodload zsh/system
+zmodload zsh/datetime
 
 [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
 
@@ -23,24 +29,29 @@ function exec_destroy() {
 # do. Printing an error message would just result in mail being sent.
 zfs get -Hp -o value name "$1" 2>/dev/null >/dev/null || exit 0
 
+# Obtain an exclusive lock to avoid race conditions arising from several concurrent instances of this script
+# trying to remove different snapshots, making the decision whether we're about to remove the snapshot of the
+# last successful backup unpredictable.
+: >>$DESTROYLOCK
+if ! zsystem flock -f lockfd -t $LOCKTIMEOUT $DESTROYLOCK; then
+	die "unable to obtain lock on $DESTROYLOCK; not destroying $1."
+fi
+
 expires=$(zfs get -Hp -o value ${PROPPREFIX}:expires "$1") || {
 	echo "FATAL: couldn't read ${PROPPREFIX}:expires property of \"$1\"" >&2
 	exit 1
 }
 
-zmodload zsh/datetime
+if [[ $EPOCHSECONDS -lt "$expires" ]]; then # Hasn't expired yet
+	log info "$1 only expires at $(strftime %F\ %H:%M:%S $expires); not removing"
+	exit 0
+fi
+if [[ "$expires" = never ]]; then
+	log info "$1 is set to never expire; not removing"
+	exit 0
+fi
 
-[[ $EPOCHSECONDS -lt "$expires" ]] && exit 0 # Hasn't expired yet
-[[ "$expires" = never ]] && exit 0
-
-# TODO: don't expire snapshots of unsuccessful backups if there are no
-# successful ones
-[[ "$(zfs get -Hp -o value ${PROPPREFIX}:successful "$1")" = "false" ]] \
-	&& exec_destroy "$1"
-
-# At this point, we know the snapshot pertains to a successful backup.
-# We don't know if it's the latest successful one, so let's find out.
-
+# We don't know if we're about to destroy the snapshot of the latest successful backup, so let's find out.
 origin=${1/@*}
 zfs list -H -d 1 -t snapshot -S creation -o ${PROPPREFIX}:successful,name $origin \
 	| grep '^true' \
@@ -48,8 +59,14 @@ zfs list -H -d 1 -t snapshot -S creation -o ${PROPPREFIX}:successful,name $origi
 	| read true latestsuccessful
 
 [[ "$1" = "$latestsuccessful" ]] && {
-	echo "$0: INFO: not removing \"$1\" as it's either the latest or the only snapshot of a successful backup." >&2
+	log warning "not removing \"$1\" as it's the snapshot of the latest (or only) successful backup."
 	exit 0
 }
 
-exec_destroy "$1"
+# TODO: don't expire snapshots of unsuccessful backups if there are no successful ones?
+log info "destroying expired snapshot $1"
+if ! zfs destroy -d "$1"; then
+	die "failed to destroy snapshot $1"
+else
+	exit 0
+fi
