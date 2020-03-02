@@ -12,7 +12,17 @@
 #
 # If we can't rule out that the filesystem changed since the last backup, we remove "no-recursive".
 #
+# TODO: support backups that use recursive snapshots (check for changes recursively)
 # TODO: optionally(?), use zfs diff to create a "files-from" file for rsync?
+
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+
+. $DEFAULT_FUNCTIONS
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+me=${0:t}:$(pwd)
 
 function no_recursion() {
 	touch no-recursive
@@ -29,19 +39,32 @@ function do_recursion() {
 [[ -f last-successfully-backed-up-snapshot-name ]] || do_recursion	# no data on last backed up snapshot, proceed
 
 zmodload zsh/stat
+zmodload zsh/datetime
 
+me=$0	# used by log()
 myfs="${1:-$(head -n 1 zfs-dataset)}"
 last_success=$(zstat +mtime stamp-success)
 snapshot_name=$(<last-successfully-backed-up-snapshot-name)
-if snapshot_created=$(zfs get -Hp -o value creation $snapshot_name); then	# only query this to make sure the snapshot still exists
-	[[ $(zfs get -Hp -o value written@$snapshot_name $myfs) = 0 ]] && no_recursion
+written=$(zfs get -Hp -o value written@$snapshot_name $myfs 2>/dev/null)
+if [[ $written = 0 ]]; then	# the 'zfs get' command returns "-" for non-existent snapshots
+	log info "Disabling recursion for backup. Last successfully backed up snapshot $snapshot_name still exists; filesystem not modified since snapshot creation."
+	no_recursion
+elif [[ $written = - ]]; then	# The snapshot no longer exists.
+	# We need to find all snapshots in decreasing order of creation time; skip the ones that are younger than the last successful backup; and check the youngest that predates the backup.
+	zfs list -d 1 -t snapshot -S creation -Hp -o name,creation $myfs 2>/dev/null | while read snapshot_name snapshot_created; do
+		[[ $snapshot_created -ge $last_success ]] && continue	# greater or equal; if equal, snapshot could have been taken just after successful backup, and could conceivably contain new writes
+		written=$(zfs get -Hp -o value written@$snapshot_name $myfs)
+		if [[ $written = 0 ]]; then
+			log info "Disabling recursion for backup. Filesystem not modified since creation of $snapshot_name at $(strftime '%F %H:%M:%S' $snapshot_created), which predates date of last successful backup ($(strftime '%F %H:%M:%S' $last_success))."
+			no_recursion	# no_recursion exits when done
+		else
+			log info "Enabling recursion. Last successfully backed up snapshot $(<last-successfully-backed-up-snapshot-name) no longer exists. Latest snapshot that predates last successful backup ($(strftime '%F %H:%M:%S' $last_success)) appears to be $snapshot_name (created at $(strftime '%F %H:%M:%S' $snapshot_created)), and at least $written bytes have changed in the filesystem since its creation."
+			do_recursion
+			# not reached
+		fi
+	done
+	log info "Enabling recursion. Last successfully backed up snapshot $(<last-successfully-backed-up-snapshot-name) no longer exists, and I couldn't find a snapshot that predates last successful backup ($(strftime '%F %H:%M:%S' $last_success)), thus I couldn't prove that the filesystem hasn't changed since last successful backup."
+else
+	log info "Enabling recursion. Filesystem definitely changed since last successful backup ($(strftime '%F %H:%M:%S' $last_success)); at least $written bytes written."
 fi
-# The above was the easy bit; we had the exact same snapshot that was used to create the backup. If we're still running, that snapshot no longer exists.
-# Now we need to find all snapshots in decreasing order of creation time; skip the ones that are younger than the last successful backup; and check the youngest that predates the backup.
-
-zfs list -d 1 -t snapshot -S creation -Hp -o name,creation $myfs | while read snapshot_name snapshot_created; do
-	[[ $snapshot_created -ge $last_success ]] && continue	# greater or equal; if equal, snapshot could have been taken just after successful backup, and could conceivably contain new writes
-	[[ $(zfs get -Hp -o value written@$snapshot_name $myfs) = 0 ]] && no_recursion
-	do_recursion
-done
-do_recursion	# there was no snaphot that predates the last backup, so we can't say for certain whether the fs changed; the safe bet is to force recursion
+do_recursion	# there was no snapshot that predates the last backup, so we can't say for certain whether the fs changed; the safe bet is to force recursion
