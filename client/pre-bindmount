@@ -1,27 +1,19 @@
 #!/bin/zsh
+
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+. $DEFAULT_FUNCTIONS
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+me="${0:t}:$(pwd)"
+
 zbPATH=$(readlink -f ./path)
 zbREALPATH=$(readlink -f ./realpath)
-[[ -z "$zbREALPATH" ]] && {
-	echo "$0: FATAL: don't know what to bind mount! $(ls -l realpath 2>&1)" >&2
-	exit 111
-}
-[[ -z "$zbPATH" ]] && {
-	echo "$0: FATAL: don't know where to bind mount $zbREALPATH! $(ls -l path 2>&1)" >&2
-	exit 111
-}
-[[ -d "$zbREALPATH/." ]] || {
-	echo "$0: FATAL: '$zbREALPATH' is not a directory!" >&2
-	exit 111
-}
-[[ "$zbREALPATH[1]" = "/" ]] || {
-	echo "$0: FATAL: '$zbREALPATH' is not absolute!" >&2
-	exit 111
-}
-[[ -d "$zbPATH" ]] || mkdir -p "$zbPATH" || {
-	echo "$0: FATAL: '$zPATH' doesn't exist and I was unable to create it." >&2
-	exit 111
-}
-mount --bind "$zbREALPATH" "$zbPATH" || {
-	echo "$0: FATAL: mount --bind '$zbREALPATH' '$zbPATH' failed." >&2
-	exit 111
-}
+
+[[ -z "$zbREALPATH" ]] && die "don't know what to bind mount! $(ls -l realpath 2>&1)"
+[[ -z "$zbPATH" ]] && die "don't know where to bind mount $zbREALPATH! $(ls -l path 2>&1)"
+[[ -d "$zbREALPATH/." ]] || die "'$zbREALPATH' is not a directory!"
+[[ "$zbREALPATH[1]" = "/" ]] || die "'$zbREALPATH' is not absolute!"
+[[ -d "$zbPATH" ]] || mkdir -p "$zbPATH" || die "'$zPATH' doesn't exist and I was unable to create it."
+mount --bind "$zbREALPATH" "$zbPATH" || die "mount --bind '$zbREALPATH' '$zbPATH' failed."
