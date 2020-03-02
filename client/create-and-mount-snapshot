@@ -1,7 +1,9 @@
 #!/bin/zsh
 #
 # This is a zfsbackup helper script that should be started from a zfsbackup
-# source config directory as a pre-client script.
+# source config directory as a pre-client script (umount-and-destroy-snapshot,
+# which is currently a symlink to this same script, should then be used as
+# a post-client script to clean up afterwards).
 #
 # This script creates a snapshot of the filesystem to be backed up and mounts
 # it; or, if called with a numeric argument, it assumes it's been called as a
@@ -12,64 +14,80 @@
 #
 #    Filesystem name in "zfs-dataset" file.
 #
-#    The snapshot will be called zpool/path/to/zfs/instance@<suffix>.
+#    The snapshot will be called zpool/path/to/zfs/instance@<snapname>.
 #
-#    <suffix> defaults to zfsbackup-${BACKUPSERVER}-$EPOCHSECONDS if
+#    <snapname> defaults to zfsbackup-${BACKUPSERVER}-$EPOCHSECONDS if
 #    $BACKUPSERVER is not empty, and simply to 'zfsbackup-$EPOCHSECONDS' if it
-#    is. TODO: make this overridable.
+#    is. TODO: make this overridable. Problem with overriding: will require manual
+#    cleanup of previous snapshots, if any.
 #
 #    Strictly speaking, the snapshot name doesn't need to contain anything like
 #    the date; only one ever needs to exist per filesystem and backup server.
-#    We can try to destroy it on startup, which will fail if it's still in use
-#    (but this shouldn't happen since zfsbackup-client ensures mutual exclusion;
-#    two instances can't process the same sources.d directory simultaneously).
+#    The benefit to having two: we can check cheaply whether they're
+#    identical, and if yes, just perform a pro forma backup to bring into being
+#    a new snapshot on the server. We thus include the epoch in the snapshot name,
+#    allowing several snapshots of the same fs to exist.
 #
-#    However, it's actually useful to keep the last snapshot as long as the
-#    origin fs is not written to, so that the 'check-if-changed-since-snapshot'
-#    script can determine that this is the case. That's why we postfix the
-#    snapshot name with the epoch.
-#
+#    If the snapshot to be created already exists (because the script is called
+#    again within the same second), it appends a numeric suffix to the snapshot
+#    name.
+#    
 #    The "path" symlink will be manipulated to point to the snapshot.
 #
-#    This mechanism only works if the zfs instance is mounted.
+#    If the origin filesystem is mounted, the snapshot will be auto-mounted
+#    (except for zfs versions affected by https://github.com/openzfs/zfs/issues/9381).
+#    If the origin filesystem is not mounted (and when using a buggy zfs version),
+#    the script uses mount(8) to mount the snapshot explicitly in a temporary
+#    directory. Disadvantage: if the post-client script is not run, the
+#    temporary directory and mount stick around forever.
 #
 # 2. zfs subtree.
 #
-#    Name of topmost filesystem in tree in "zfs-dataset" file.
-#
-#    "recursive-snapshot" should exist.
+#    Name of topmost filesystem in tree is in the "zfs-dataset" file.
+#    The "recursive-snapshot" flag file exists.
+#    "no-xdev" should exist, otherwise rsync won't traverse the child
+#    filesystems.
 #
 #    Optionally, "no-snapshot" can contain a list of (child) filesystems that
 #    should be excluded from the backup. This is implemented by snapshotting
 #    them as well initally ("zfs snapshot -r" doesn't make exceptions), but
-#    removing the snapshots immediately afterwards.
+#    removing the snapshots immediately afterwards. Snapshots of any child
+#    objects that are not filesystems (but, for example, zvols), as well
+#    as of filesystems not mounted somewhere under the mountpoint of the
+#    topmost filesystem, are also removed and not included in the backup.
 #
-#    The snapshot will be called zpool/path/to/zfs/instance@<suffix>.
+#    The snapshot will be called zpool/path/to/zfs/instance@<snapname>.
 #
-#    <suffix> is generated as above.
+#    <snapname> is generated as above, except that it will include a base36
+#    representation of the CRC32 of the name of the topmost dataset; this
+#    ensures that overlapping recursive backups don't interfere with each
+#    other and each job only removes snapshots it is responsible for.
 #
-#    "path" should be a directory; the topmost snapshot will be bind mounted
-#    on it, with child snapshots bind mounted in appropriate places under it.
+#    "path" should be a directory; the topmost snapshot will be mounted
+#    in it, with child snapshots being mounted in appropriate places under
+#    it (using regular `mount -t zfs`, not automounts as this is more
+#    universal -- it also works on snapshots of filesystems that are not
+#    themselves mounted).
 #
-#    "no-xdev" should exist, otherwise rsync won't traverse the child
-#    filesystems.
+#    TODO: sub-source support (don't warn if no-xdev doesn't exist; don't
+#    mount snapshots of child filesystems, just create them and somehow
+#    indicate to sub-sources which snapshot to back up).
 #
-#    This mechanism only backs up the zfs instances that are mounted.
-#
-# 3. zvol with arbitrary mountable filesystem. (TBD)
+# 3. zvol with arbitrary mountable filesystem. (TBD -- the code that's there
+#    is currently just a placeholder)
 #
 #    Volume name in "zvol" file.
 #
-#    The snapshot will be called zpool/path/to/zvol@<suffix>. In order to
+#    The snapshot will be called zpool/path/to/zvol@<snapname>. In order to
 #    ensure snapshot visibility without having to set snapdev=visible (which
 #    may be undesirable if there are many snapshots), the snapshot will be
 #    immediately cloned. We'll mount the clone, not the snapshot itself.
 #    This also helps with journaling filesystems that need to write to the
 #    volume on mount.
 #
-#    <suffix> is generated as above.
+#    <snapname> is generated as above.
 #
-#    The clone will be called zpool/<prefix>_<originalvolumename>_<suffix>.
+#    The clone will be called zpool/<prefix>_<originalvolumename>_<snapname>.
 #
 # 4. LVM block device with arbitrary mountable filesystem. (TBD)
 #
@@ -79,13 +97,15 @@
 #    The size of the snapshot will be 100M but this can be overridden using
 #    the "snapsize" file.
 #
-#    The snapshot will be called <prefix>_<originalvolumename>_<suffix>.
-#last-successfully-backed-up-snapshot-creation
+#    The snapshot will be called <prefix>_<originalvolumename>_<snapname>.
 #    <prefix> defaults to "snap" and can be overridden using the "snapprefix"
 #    file (which can also be empty).
 #
-#    <suffix> defaults to zfsbackup-${BACKUPSERVER} if $BACKUPSERVER is not
+#    <snapname> defaults to zfsbackup-${BACKUPSERVER} if $BACKUPSERVER is not
 #    empty, and simply to 'zfsbackup' if it is. TODO: make this overridable.
+#
+#    TODO: support checking for changes between successive snapshots? Not sure
+#    it's worth it, because LVM snapshots are expensive.
 #
 # In the last two cases, the snapshot will be mounted under the directory
 # "path" points to using '-o ro,noexec,nosuid,nodev' (also nouuid if the fs
@@ -98,38 +118,24 @@
 # (it should contain the full option string, e.g. "ro,noexec").
 # 
 # TODO: make sure exit status values are consistent and documented.
-# TODO: make sure error messages are consistent (mostly "ERROR" vs. "FATAL")
-# TODO: maybe refactor to reuse even more code among the 3 main cases
 
 LOG_LEVEL=${LOG_LEVEL:-debug}
-LOG_LEVEL_NAMES=(emerg alert crit err warning notice info debug)	# we also use these in syslog messages, so we have to use these specific level names
 LVM_DEFAULT_SNAPSHOT_SIZE=100M
 LVM_DEFAULT_SNAPSHOT_PREFIX=snap
 LVM_DEFAULT_SNAPSHOT_SUFFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
-ZFS_DEFAULT_SNAPSHOT_SUFFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
+ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 
+. $DEFAULT_FUNCTIONS
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 [[ -r /etc/zfsbackup/create-and-mount-snapshot.conf ]] && . /etc/zfsbackup/create-and-mount-snapshot.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
 
-me="create-and-mount-snapshot:$(pwd)"
-
-function log() { # prints message on stderr and logs it to syslog; TODO: maybe also support a logfile?
-	local level=$1
-	local level_index=${LOG_LEVEL_NAMES[(ie)$level]}
-	shift
-	if ((${LOG_LEVEL_NAMES[(ie)$LOG_LEVEL]}>=level_index)); then
-		# echo "$me: $level: $@" >&2	# commented out because logger(1) with the --stderr flag also outputs to stderr
-		logger --stderr --tag "$me" --id=$$ --priority user.$level -- "$@"
-	fi
-}
-	
-function die() { # logs high-priority message, then exits the script with an error
-	log emerg "$@"
-	exit 111
-}
+me="${0:t}:$(pwd)"
 
 function lvm_snapshot() {
-# TODO: test
+# TODO: test -- completely untested
 	local ret=0
 	[[ -d ./path/. ]] || die "$(pwd)/path is not a directory; aborting."
 	if [[ -L logicalvolume ]]; then
@@ -190,8 +196,8 @@ function zvol_snapshot() {
 #	initvars
 	snapparentpath="/dev/$zpool"
 	abortifprevsnapexists	# TODO: test existence of both snapshot and clone
-	snapname="$zvol@$suffix"
-	clonename="${snapprefix:+${snapprefix}_}${zvol}_${suffix}"
+	snapname="$zvol@$snapname"
+	clonename="${clonerefix:+${cloneprefix}_}${zvol}_${snapname}"
 	zfs snapshot "$snapname"
 	ret_snapshot=$?
 	if [[ "$ret_snapshot" = 0 ]]; then
@@ -202,13 +208,13 @@ function zvol_snapshot() {
 			if try_mount "$snapparentpath/$clonename"; then
 				exit 0
 			else
-				zfs destroy "$zpool/$clonename"
-				zfs destroy "$snapname"
+				zfs_destroy "$zpool/$clonename"
+				zfs_destroy "$snapname"
 				exit 3
 			fi
 		else
 			echo "$0: FATAL: 'zfs clone \"$snapname\" \"$zpool/$clonename\"' failed with status $ret_clone. Will try to destroy $snapname and abort." >&2
-			zfs destroy "$snapname"
+			zfs_destroy "$snapname"
 			exit 5
 		fi
 	else
@@ -217,103 +223,182 @@ function zvol_snapshot() {
 	fi
 }
 
-function zfs_snapshot() {
-# TODO: test
-	local ret=0 snap
-	zfsdataset="$(<zfs-dataset)"
-	[[ -L path ]] || die "$(pwd)/path is not a symlink."
-	if ! ((postclient)); then
-		zfs_mounted="$(zfs get -Hp -o value mounted "$zfsdataset")"
-		[[ "$zfs_mounted" = no ]] && die "$zfsdataset is not mounted. Aborting."
-		zfs_mp="$(zfs get -Hp -o value mountpoint "$zfsdataset")"
-		if [[ "$zfs_mp" = legacy ]]; then	# we don't need to test for 'none' because that would've caused the zfs_mounted test above to fail
-			die "Filesystems with legacy mountpoints are not supported yet."
+# Helper function to umount and destroy a snapshot; argument is the snapshot
+# (or clone) name; should only be called on objects zfsbackup created,
+# because it will happily destroy anything (modulo the sanity check below).
+# Returns with the exit code of `zfs destroy`.
+function zfs_destroy() {	 
+	local objecttype=$(zfs get type -H -o value $1)
+	case $objecttype in
+		snapshot)		: ;;
+		filesystem|volume)	if [[ $(zfs get origin -H -o value $1) = - ]]; then
+						log alert "zfs_destroy() called on '$1', which appears to be a regular $objecttype, not a clone or snapshot! Not destroying."
+						return 111
+					fi;;
+		*)			log err "zfs_destroy() called on '$1', of unexpected type '$objecttype'. Not destroying it."
+					return 1;;
+	esac
+	[[ $mount_method = mount ]] && umount $1 2>&1 | grep -v 'no mount point specified'	# try to umount it, just in case it's mounted somewhere
+	zfs destroy $1	# try to destroy it regardless of whether umount succeeded; at worst, zfs destroy will also fail
+}
+
+# Helper function to destroy all snapshots of an object that this script
+# created (detected by their names matching the prefix this script uses),
+# except the one that was used to create the last successful backup.
+# By keeping that one, we can save time and i/o on the next backup run if
+# the filesystem is not changed between backup runs.
+function destroy_outdated_snapshots() { # arg1=dataset whose snapshots to destroy; arg2=prefix of snapshot name to match; arg3=name of last succesful snapshot (optional)
+	local ret=0 final_ret=0 snap msg
+	local zfsdataset=$1
+	local prefix=$2
+	local last_successful=$3
+	[[ -z $last_successful ]] && [[ -f last-successfully-backed-up-snapshot-name ]] && last_successful=$(<last-successfully-backed-up-snapshot-name)
+	zfs list -t snap -d 1 $zfsdataset -Hp -o name -s creation | fgrep $zfsdataset@$prefix | while read snap; do
+		[[ $snap = $last_successful ]] && continue	# leave this one alone; it's useful during the next backup run, to see if there were changes
+		log debug "destroying $snap."
+		msg=$(zfs_destroy $snap 2>&1)
+		ret=$?
+		((final_ret+=ret))
+		((ret)) && log warning "failed to destroy '$snap': $msg ($ret). Please look into why this happened."
+	done
+	return final_ret
+}
+
+snap_mp="" # this needs to be global as mount_zfs_snapshot() returns a value in it
+# Helper function. Mounts a snapshot and sets the global snap_mp variable to
+# path of mountpoint. If no mountpoint specified, optinally creates tempdir
+# (depending on $mount_method) and symlinks ./path to mountpoint.
+function mount_zfs_snapshot() {	# usage: mount_zfs_snapshot fsname snapname fsmountpoint [ snapmountpoint ]
+	local zfsdataset=$1
+	local snapname=$2
+	local zfs_mp=$3
+	snap_mp=$4
+	local ret mountmsg
+	if [[ -z $snap_mp ]]; then	# snap_mp not passed in; we were called by zfs_snapshot(), not recursive_zfs_snapshot()
+		if [[ $mount_method = cd ]]; then
+			for i in {1..5}; do # This needs to be retried a few times because of some timing issue on some kernels
+				# switch to the directory to force it to become mounted
+				pushd "$zfs_mp/.zfs/snapshot/$snapname/." && popd && snap_mp="$zfs_mp/.zfs/snapshot/$snapname" && break
+				sleep 0.5
+			done
+		else	# we need to workaround "Object is remote" automount bug, or use mount(8) for some other reason
+			tempdir=$(mktemp -d) || { log emerg "Failed to create temporary directory."; return 111 }
+			mountmsg=$(mount -t zfs $zfsdataset@$snapname $tempdir 2>&1)
+			ret=$?
+			if ((ret)); then
+				rmdir $tempdir
+				log crit "Failed to mount $zfsdataset@$snapname on $tempdir."
+				return $ret
+			fi
+			snap_mp=$tempdir
 		fi
-	fi
-	suffix=$ZFS_DEFAULT_SNAPSHOT_SUFFIX
-	if ((postclient)); then
-		# we want to keep the current snapshot for the benefit of the check-if-changed-since-snapshot script and only destroy any earlier zfsbackup snasphots
-		zfs list -t snap -r $zfsdataset -Hp -o name -s creation | fgrep @$suffix | sed '$d' | while read snap; do	# the sed command removes the last line, keeping the youngest snapshot(s)
-			log debug "destroying $snap."
-			zfs destroy $snap
-			((ret+=$?))
-		done
+		if [[ -d "$snap_mp/." ]] && mountpoint -q "$snap_mp/."; then
+			if [[ -e path ]]; then
+				rm -f path || { log emerg "Failed to remove old 'path' symlink from $(pwd)."; return 111 }
+			fi
+			ln -sf "$snap_mp" path || { log emerg "Failed to make '$(pwd)/path' a symlink to '$mp/.zfs/snapshot/$snapame'."; return 111 }
+		else
+			log emerg "I expected $zfsdataset@$snapname to be mounted in $snap_mp, but it isn't. Maybe we lost a race with a snapshot remove operation?"
+			return 111
+		fi
+	else	# snap_mp specified; we were called by recursive_zfs_snapshot()
+		mountmsg=$(mount -t zfs $zfsdataset@$snapname $snap_mp 2>&1)
+		ret=$?
+		if ((ret)); then
+			log emerg "Unable to mount $zfsdataset@$snapname under $snap_mp: $mountmsg ($ret)."
+		fi
 		return $ret
 	fi
-	# not reached in postclient case
-	suffix="$suffix-$EPOCHSECONDS"
-	snapname="$zfsdataset@$suffix"
-	if zfs get -H -o value type "$snapname" >/dev/null 2>/dev/null; then
-		log info "$snapname exists; attempting to destroy."
-		zfs destroy $snapname	# technically, this is racy -- maybe the snapshot existed above but no longer exists now?
+	return 0
+}
+
+function zfs_snapshot_postclient() {
+	local zfsdataset="$(<zfs-dataset)" msg ret final_ret
+	[[ -L path ]] || die "$(pwd)/path is not a symlink."
+	if mountpoint -q path/.; then
+		log debug "$(readlink -f path/.) is still mounted. Trying to umount."
+		msg=$(umount path >&2)
 		ret=$?
-		if [[ $ret -gt 0 ]] && zfs get -H -o value type "$snapname" >/dev/null 2>/dev/null; then	# if we lost a race above, the snapshot won't exist here anymore
-			die "zfs destroy $snapname returned an error. Can't continue."
-		fi
+		((ret)) && log err "Failed to umount $(readlink -f path/.): $msg ($ret). Continuing regardless."
+		((final_ret+=$ret))
 	fi
-	zfs snapshot "$snapname"
-	ret_snapshot=$?
-	if [[ "$ret_snapshot" = 0 ]]; then
-		for i in {1..5}; do # This needs to be retried a few times because of some timing issue on some kernels
-			# switch to the directory to force it to become mounted
-			pushd "$zfs_mp/.zfs/snapshot/$suffix/." && popd && break
-			sleep 0.5
-		done
-		if [[ -d "$zfs_mp/.zfs/snapshot/$suffix/." ]]; then
-			if [[ -e path ]]; then
-				rm path || die "Failed to remove old 'path' symlink from $(pwd)."
-			fi
-			ln -sf "$zfs_mp/.zfs/snapshot/$suffix" path || die "Failed to make '$(pwd)/path' a symlink to '$mp/.zfs/snapshot/$suffix'."
-		else
-			die "$zfs_mp/.zfs/snapshot/$suffix doesn't exist anymore; maybe we lost a race with a snapshot remove operation."
-		fi
-		return 0
+	# If mount_method=mount (and not 'cd'), it means we created a temporary directory and mounted the snapshot in it explicitly. We can remove that temporary directory now.
+	[[ $mount_method = mount ]] && rmdir $(readlink -f path)
+	destroy_outdated_snapshots $zfsdataset $ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX
+	((final_ret+=$?))
+	return $final_ret
+}
+
+function zfs_snapshot() {
+# TODO: test
+	local ret=0 snap tempdir snap_mp snapname i=0 msg
+	local prefix=$ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX
+	local zfsdataset="$(<zfs-dataset)"
+	[[ -e no-xdev ]] && log warning "no-xdev exists and you're requesting a non-recursive snapshot. This is probably not what you want. no-xdev will have no effect."
+	# If post-client wasn't run, it's possible the last snapshot is still mounted. Umount it now, if we can, and perform all the other cleanup if necessary.
+	zfs_snapshot_postclient
+	# If our dataset is not mounted, we can't automount the snapshot and have to mount it explicitly. Automounting is better because then we don't leave the mount around indefinitely if the post-client is not called.
+	if [[ "$(zfs get -Hp -o value mounted "$zfsdataset")" = no ]]; then
+		mount_method=mount
+		log info "$zfsdataset is not mounted; we have to mount the snapshot via mount(8)."
 	else
-		die "'zfs snapshot \"$snapname\"' failed with status $ret_snapshot. Aborting."
+		# ditto: prefer automounting, if possible.
+		zfs_mp="$(zfs get -Hp -o value mountpoint "$zfsdataset")"
+		[[ "$zfs_mp" = legacy ]] && mount_method=mount && log info "$zfsdataset has a legacy mountpoint; we have to mount the snapshot via mount(8)."
+		[[ "$zfs_mp" = none ]] && mount_method=mount && log info "$zfsdataset has no configured mountpoint; we have to mount the snapshot via mount(8)."
+	fi
+	snapname="$prefix-${EPOCHSECONDS}"
+	# If we're being run within one second of the last backup (as unlikely as that may be), the previous snapshot can still exist, and we need to come up with a new name for our snapshot.
+	while zfs get -H -o value type "$zfsdataset@$snapname" >/dev/null 2>/dev/null; do
+		log debug "$zfsdataset@$snapname exists; trying a different snapshot name."
+		snapname="$prefix-${EPOCHSECONDS}.$((++i))"
+	done
+	zfs snapshot "$zfsdataset@$snapname"	# maybe set some properties? what would make sense?
+	ret_snapshot=$?
+	if [[ "$ret_snapshot" = 0 ]]; then	# snapshot succeeded, mount it
+		mount_zfs_snapshot $zfsdataset $snapname $zfs_mp || exit 111 # mount_zfs_snapshot already logged the error; we merely need to quit here
+	else
+		die "'zfs snapshot \"$zfsdataset@$snapname\"' failed with status $ret_snapshot. Aborting."
 	fi
 }
 
-function recursive_zfs_snapshot() {
-# TODO: test; add EPOCHSECONDS to suffix (as above)
-	local -a zfs_instances temparray nosnapshot
-	local -A zfs_mp
-	local OLDIFS="$IFS"
-	local IFS="
-"
-	local ret=0
-	local final_ret=0
-	
-	zfsdataset="$(<zfs-dataset)"
-	[[ -e no-xdev ]] || { ((postclient)) || log warn "You're requesting recursive zfs snapshots but don't have no-xdev in $(pwd). This appears nonsensical; are you sure it is what you want?" }
+# these variables are global because recursive_zfs_snapshot_init() sets them for other functions to use
+zfsdataset=""
+prefix=""
+newline='
+'	# we'll use this as IFS
+OLDIFS="$IFS"
+typeset -U zfs_instances	# will hold a recursive list of all child filesystems of the tree rooted at $zfsdataset
+typeset -U all_children		# will hold a recursive list of all child objects of the tree rooted at $zfsdataset; anything that's not a filesystem automatically goes into nosnapshot
+typeset -U nosnapshot		# will hold a list of filesystems we aren't supposed to snapshot and back up. Of course, zfs snapshot -r will snapshot them anyway, but we immediately remove theri snapshots.
+typeset -i 36 crc32	# we'll print this number in base36 to make it as short as possible
+typeset -A zfs_mp	# hash. key: zfs dataset name; value: mounpoint of dataset.
+
+function recursive_zfs_snapshot_init() { # bits common to preclient and postclient
+	local name type
+	[[ -L path ]] && die "$(pwd)/path is not a directory."
 	[[ -d path ]] || die "$(pwd)/path is not a directory."
-	[[ -r no-snapshot ]] && nosnapshot=($(<no-snapshot))
-	zfs_instances=($(zfs list -r -t filesystem -H -o name $zfsdataset))
-	if mountpoint -q path; then	# It's impossible we're running concurrently with another backup job because zfsbackup-client enforces mutual exclusion; thus this is safe even in pre-client, and handles cases where post-client wasn't run
-		umount -R path
-		((final_ret+=$?))
-	fi
-# first destroy any existing snapshots that will get in the way of the new recursive snapshot
+	zfsdataset="$(<zfs-dataset)"
+	echo -n "$zfsdataset" | cksum | read crc32 unused
+	prefix="$ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX-${crc32##36\#}"	# The suffix includes the CRC32 of the origin fs, so that when we remove snapshots recursively, we only remove ones created as a result of this backup job, not one ones created by a recursive backup of a subtree or a higher level fs. CRC32 isn't a strong hash, but it should be good enough for this purpose.
+	# Also: if pool/fs1 mounted on /fs1 and pool/fs1/fs2 mounted on /fs2 -- since /fs2 is not under /fs1, we won't back it up; however, we also don't want to destroy any of its snapshots.
+	IFS="$newline	"
+	[[ -r no-snapshot ]] && nosnapshot=($(<no-snapshot))	# a list of filesystems that should not be included in the recursive snapshot
+	zfs list -r -H -o name,type $zfsdataset | while read name type; do
+		all_children=($all_children $name)
+		if [[ $type = filesystem ]]; then
+			zfs_instances=($zfs_instances $name)
+		else
+			nosnapshot=($nosnapshot $name)
+		fi
+	done
+	IFS="$OLDIFS"
+	# populate nosnapshot with other filesystems we don't want to include in the backup
 	for i in $zfs_instances[@]; do
-		snapname="$i@$ZFS_DEFAULT_SNAPSHOT_SUFFIX"
-		if zfs get -H -o value type "$snapname" >/dev/null 2>/dev/null; then
-			((postclient)) || log info "$snapname exists; attempting to destroy."
-			zfs destroy $snapname
-			ret=$?
-			if [[ $ret -gt 0 ]] && ! ((postclient)); then
-				die "zfs destroy $snapname returned an error. Can't continue." # in the post-client case, we still try to destroy the other snapshots even if destroying one failed
-			fi
-			((final_ret+=ret))
-		fi
-		((postclient)) && continue # the rest is not relevant for post-client
-# now, add filesystems that are not mounted, or whose mountpoint is not under the mountpoint of our subtree root, to the nosnapshot array
-		zfs_mounted="$(zfs get -Hp -o value mounted "$i")"
-		if [[ "$zfs_mounted" = no ]]; then
-			log info "$i is not mounted. We won't include it in the backup."
-			nosnapshot=($nosnapshot[@] $i)
-		fi
 		zfs_mp[$i]="$(zfs get -Hp -o value mountpoint "$i")"
 		if [[ "$zfs_mp[$i]" = legacy ]]; then
-			log info "Filesystems with legacy mountpoints are not supported yet; we won't include $i in the backup."
+			# if the entire zfs subtree has legacy mountpoints, with could assume the zfs hierarchy reflects a mount hierarchy and back them up like that regardless, but I expect that to be a very rare case
+			log info "Filesystems with legacy mountpoints are not supported for recursive snapshots; we won't include $i in the backup."	
 			nosnapshot=($nosnapshot[@] $i)
 		fi
 		[[ -z "$zfs_topmost_mp" ]] && zfs_topmost_mp=$zfs_mp
@@ -322,34 +407,75 @@ function recursive_zfs_snapshot() {
 			nosnapshot=($nosnapshot[@] $i)
 		fi
 	done
-	((postclient)) && return $final_ret	# we're done unmounting and removing, so return
-	suffix=$ZFS_DEFAULT_SNAPSHOT_SUFFIX
-	snapname="$zfsdataset@$suffix"
-	zfs snapshot -r "$snapname"
-	ret_snapshot=$?
-	if [[ "$ret_snapshot" = 0 ]]; then
-		for i in $nosnapshot[@]; do
-			zfs destroy $i@$suffix
-		done
-		zfs_instances=(${zfs_instances:|nosnapshot})
-		for i in $zfs_instances[@]; do
-			log debug "Trying to get $i@$suffix mounted in $zfs_mp[$i]/.zfs/snapshot/$suffix/."
-			for x in {1..5}; do # This needs to be retried a few times because of some timing issue on some kernels
-				# switch to the directory to force it to become mounted
-				pushd "$zfs_mp[$i]/.zfs/snapshot/$suffix/." && popd && log debug "$i@$suffix successfully mounted in $zfs_mp[$i]/.zfs/snapshot/$suffix/." && break
-				sleep 0.5
-			done
-			if ! mount --bind $zfs_mp[$i]/.zfs/snapshot/$suffix/. $(pwd)/path/${zfs_mp[$i]##$zfs_topmost_mp}; then
-				log crit "'mount --bind $zfs_mp[$i]/.zfs/snapshot/$suffix/. $(pwd)/path/${zfs_mp[$i]##$zfs_topmost_mp}' returned an error. Trying to roll back mount."
-				umount -R $(pwd)/path/.
-				die "Failed to recursively mount the snapshots of $zfsdataset."
+}
+
+function recursive_zfs_snapshot_postclient() {
+	local i last_successful msg ret=0 final_ret=0
+	recursive_zfs_snapshot_init # sets $prefix, $zfsdataset, $nosnapshot, $zfs_instances, ...
+	if mountpoint -q path; then	# It's impossible we're running concurrently with another backup job because zfsbackup-client enforces mutual exclusion; thus this is safe
+		# Technically, it's possible that path itself isn't a mountpoint, but a subdirectory is -- we don't have to care about that, but (TODO) it would be nice to print a warning
+		msg=$(umount -R path >&2)
+		ret=$?
+		((ret)) && log err "$(readlink -f path) is a mountpoint, and we failed to umount it: $msg ($ret). Continuing regardless."
+	fi
+	[[ -z $last_successful ]] && [[ -f last-successfully-backed-up-snapshot-name ]] && last_successful=$(<last-successfully-backed-up-snapshot-name)
+	for i in $zfs_instances; do	# recursively delete all zfsbackup snapshots except the last successful one
+		destroy_outdated_snapshots $i $prefix ${last_successful/$zfsdataset@/$i@}	# $last_successful includes the dataset name, so always replace it with the name of the dataset we're processing
+		ret=$?
+		((final_ret+=$ret))
+	done
+	for i in $nosnapshot; do	# recursively delete all zfsbackup snapshots that may have been left around
+		destroy_outdated_snapshots $i $prefix this-cannot-match	# objects in $nosnapshot should not have zfsbackup snapshots; by passing "this-cannot-match" to destroy_outdated_snapshots() we ensure that it will not treat any snapshot it finds as the last successful one (which would be spared)
+		ret=$?
+		((final_ret+=$ret))
+	done
+	return $final_ret
+}
+
+function recursive_zfs_snapshot() { # in this case, ./path is a directory (not a symlink), and we mount our system of recursive snapshots under it
+# TODO: test
+	local unused msg snap_exists=1 i=0 z currentmp
+	local ret=0
+	
+	recursive_zfs_snapshot_init # sets $prefix, $zfsdataset, $nosnapshot, $zfs_instances, ...
+	recursive_zfs_snapshot_postclient # removes outdated snapshots and such; unmounts path/ recursively -- thus also useful during pre-client
+	[[ -e no-xdev ]] || log warning "You're requesting recursive zfs snapshots but don't have no-xdev in $(pwd). This appears nonsensical; are you sure it is what you want?"
+
+	snapname="$prefix-${EPOCHSECONDS}"
+	# If we're being run within one second of the last backup (as unlikely as that may be), the previous snapshot can still exist, and we need to come up with a new name for our snapshot.
+	while [[ $snap_exists = 1 ]]; do
+		snap_exists=0
+		for z in $all_children; do
+			if zfs get -H -o value type "$z@$snapname" >/dev/null 2>/dev/null; then
+				log debug "$z@$snapname exists; trying a different snapshot name."
+				snapname="$prefix-${EPOCHSECONDS}.$((++i))"
+				snap_exists=1
 			fi
 		done
-		return 0 # we treated previous errors as fatal, so if we're here, everything is fine
+	done
+	zfs snapshot -r "$zfsdataset@$snapname"
+	ret_snapshot=$?
+	if [[ "$ret_snapshot" = 0 ]]; then
+		for z in $nosnapshot[@]; do
+			zfs_destroy $z@$snapname || log warning "$z isn't supposed to be snapshotted and backed up, but I was unable to destroy $z@$snapname which 'zfs snapshot -r '$zfsdataset@$snapname' created."
+		done
+		zfs_instances=(${zfs_instances:|nosnapshot})
+		for z in $zfs_instances[@]; do
+			currentmp=$PWD/path/${zfs_mp[$z]##$zfs_topmost_mp}
+			currentmp=${currentmp/\/\///}	# remove double slash (purely cosmetic)
+			log debug "Trying to get $z@$snapname mounted in $currentmp."
+			mount_zfs_snapshot $z $snapname $zfs_mp[$z] $currentmp
+			ret=$?
+			if ((ret)); then
+				log crit "'mount_zfs_snapshot $z $snapname $zfs_mp[$z] $currentmp' returned an error ($ret). Trying to roll back and exiting." 
+				recursive_zfs_snapshot_postclient
+				die "Failed to recursively mount the snapshots of $zfsdataset. Aborting."
+			fi
+		done
 	else
-		die "'zfs snapshot \"$snapname\"' failed with status $ret_snapshot. Aborting."
+		die "'zfs snapshot -r '$zfsdataset@$snapname' failed with status $ret_snapshot. Aborting."
 	fi
-	IFS="$OLDIFS"
+	return 0 # we treated previous errors as fatal, so if we're here, everything is fine
 }
 
 zmodload zsh/datetime
@@ -357,17 +483,20 @@ zmodload zsh/datetime
 postclient=0
 [[ "$1" = <-> ]] && postclient=1	# if $1 is a number, we're being called as a post-client script
 [[ "${0:t}" = umount-and-destroy-snapshot ]] && postclient=1	# the name is also a strong hint
+mount_method=cd
+[[ -f /sys/module/zfs/version ]] && grep -q '^0\.8\.[23]' /sys/module/zfs/version && mount_method=mount	# these versions can't automount some snapshots and report "Object is remote", but mounting them via mount(8) works
 
 if [[ -e logicalvolume ]]; then # this is case #4 explained above.
 	lvm_snapshot
 elif [[ -r zvol ]]; then # this is case #3
 	zvol_snapshot
 elif [[ -r recursive-snapshot ]]; then # this is case #2
+	((postclient)) && { recursive_zfs_snapshot_postclient; exit $? }
 	recursive_zfs_snapshot
 elif [[ -r zfs-dataset ]]; then # this is case #1
-	[[ -e no-xdev ]] && die "no-xdev exists and you're requesting a non-recursive snapshot. This is probably not what you want; exiting."
+	((postclient)) && { zfs_snapshot_postclient; exit $? }
 	zfs_snapshot
 else
-	die "Neither of 'logicalvolume', 'zvol' or 'zfs-dataset' exist in $(pwd). Don't know what to do; aborting."
+	die "Neither of 'logicalvolume', 'zvol' or 'zfs-dataset' exist in $(pwd). I don't know what to do; aborting."
 fi
 exit $?
