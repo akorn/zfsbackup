@@ -140,11 +140,16 @@ CONFIG="/etc/zfsbackup/restore-snaphot/$RSYNC_MODULE_NAME"
 
 mkdir -p $RSYNC_MODULE_PATH || exit 1
 
-[[ -n "$1" ]] && [[ "$(zfs get -H -o value name)" = "$1" ]] && zfs_dataset="$1"
+if [[ -n "$1" ]]; then
+	[[ "$(zfs get -H -o value name)" = "$1" ]] && zfs_dataset="$1"
+else
+	zfs_dataset="$(findmnt -rno SOURCE $RSYNC_MODULE_PATH)"
+	[[ "$(zfs get -H -o value name)" = "$zfs_dataset" ]] || unset zfs_dataset
+fi
 
 [[ -e "$CONFIG" ]] && . "$CONFIG"	# can override $zfs_dataset. TODO: make recursive bind mounting optional (but probably still default)
 
-if ! [[ -v zfs_dataset ]]; then	# neither the "$1" logic nor the config gave us a $zfs_dataset
+if ! [[ -v zfs_dataset ]]; then	# neither the "$1" logic nor RSYNC_MODULE_PATH nor the config gave us a $zfs_dataset
 	echo "$0: This rsync module is unconfigured. Can't continue."	# will be shown to client
 	exit 1
 fi
@@ -170,7 +175,7 @@ touch "NOTE: all the directories you see in the root of this rsync module are em
 i=0
 mode=opts	# Minimal state machine. We need to process rsync options first; the end of option is signaled by an array element with the value "."; the rest are paths.
 while :; do
-	rsync_arg=RSYNC_ARG$i
+	rsync_arg=RSYNC_ARG$i	# create a "pointer into the RSYNC_ARG pseudo-array". If $rsync_arg="RSYNC_ARG42", then ${(P)rsync_arg} expands to $RSYNC_ARG42.
 	rsync_args=($rsync_args "$rsync_arg=${(P)rsync_arg}")	# we only collec these in an array so we can print the array later for debugging
 	((i++))
 	case $mode in
@@ -191,9 +196,8 @@ for req_dir in $request_paths[@]; do
 	req_dir=${req_dir%/}	# strip tailing slash if any
 	req_dir=${req_dir#/}	# strip leading slash if any
 	if [[ -L $req_dir ]]; then
-		# mount latest snapshot under directory pointed to by symlink
 		snapname=$(readlink $req_dir)
-		bindmount_recursive ${snapname:t} ${snapname:t}
+		bindmount_recursive ${snapname:t} ${snapname:t} # mount appropriate snapshot under directory pointed to by symlink
 	elif [[ -d "$req_dir" ]]; then
 		bindmount_recursive $req_dir $req_dir
 	elif parse_date "$req_dir"; then
