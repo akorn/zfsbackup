@@ -43,7 +43,7 @@ is intended more as a reference.
 The `zfsbackup` system consists of the following macroscopic components:
 
  1. A client (`zfsbackup-client`) with a bunch of support scripts. These support scripts can create snapshots before running a backup, for example; `zfsbackup-create-source` helps automate initial backup configuration.
- 2. Client-side configuration. There are some global config items, and each backup job has its own configuration. Typically you'd have one backup job per origin filesystem and backup server; e.g. "back up `/home` to `server1` would be one job. `zfsbackup` calls these jobs "sources".
+ 2. Client-side configuration. There are some global config items, and each backup job has its own configuration. Typically you'd have one backup job per origin filesystem and backup server; e.g. "back up `/home` to `server1`" would be one job. `zfsbackup` calls these jobs "sources".
  3. An `rsync` server with zfs storage.
  4. Server side scripts:
    * `make-snapshot`, to be called by `rsync`, creates a snapshot when a backup transfer completes, setting various zfs properties.
@@ -57,9 +57,9 @@ The `client` subdir of the project contains the script that runs on
 the client side, called `zfsbackup-client`.
 
 In the simplest case where you only have one backup server, it first reads
-defaults from `/etc/zfsbackup/client.conf`, then iterates over the directories
-in `/etc/zfsbackup/sources.d`, each of which pertain to a directory tree to be
-backed up.
+defaults from `/etc/zfsbackup/client.conf`, then iterates over the
+directories in `/etc/zfsbackup/sources.d`, each of which pertains to a
+directory tree to be backed up.
 
 Normally, `sources.d` directories aren't created manually but by the
 `zfsbackup-create-source` script.
@@ -100,7 +100,7 @@ of which are optional, and most of which control the behaviour of `rsync`:
  * `pre-client.d/` -- a directory that will be passed to `run-parts` (after `pre-client` has been run, if it exists).
  * `realpath` -- used by `pre-bindmount` helper script; it bind mounts `realpath` to `path` before backing up `path`.
  * `recursive-snapshot` -- used by the `create-and-mount-snapshot` helper script; if it exists, and `create-and-mount-snapshot` is set up as a pre-client script, it creates a recursive snapshot of the zfs dataset specified in `zfs-dataset`, then mounts the snapshots under `path/`.
- * `snapmountoptions` -- used by the the `create-and-mount-snapshot` helper script; specifies the mount options to use when mounting a snapshot volume. The defaults should be safe and fine.
+ * `snapmountoptions` -- Currently not implemented. Will be used by the the `create-and-mount-snapshot` helper script; specifies the mount options to use when mounting a snapshot volume. The defaults should be safe and fine.
  * `snapsize` -- used by the the `create-and-mount-snapshot` helper script; specifies the size (as passed to `lvcreate`) of the LVM snapshot volume to create. The default is 100M.
  * `stderr` -- if it exists, stderr will be redirected into it; could be a symlink or a fifo. Later versions may check if it's executable and if it is, run it and pipe stderr into it that way (TODO).
  * `stdout` -- like above, but for standard output.
@@ -111,6 +111,8 @@ of which are optional, and most of which control the behaviour of `rsync`:
  * `username` -- username to send to `rsyncd`
  * `zfs-dataset` -- used by the `set-path-to-latest-zfs-snapshot` pre-client script; it finds the latest snapshot of the ZFS dataset named in `zfs-dataset`, then makes `path` a symlink to it before invoking `rsync` on `path`. The `create-and-mount-snapshot` script uses it as well to find out what zfs dataset to snapshot.
  * `zvol` -- used by `create-and-mount-snapshot` helper script; should contain the name of a zvol whose snapshot should be created and mounted under `path/` before rsync is run. This functionality isn't completely implemented yet and thus can't be used.
+
+Other specific `rsync` options may be supported explicitly in future versions.
 
 Additionally, the `zfsbackup` scripts can create the following files:
 
@@ -128,14 +130,12 @@ Additionally, the `zfsbackup` scripts can create the following files:
  * `stamp-success` -- created and its timestamp updated whenever a backup completes successfully. Can be used to check when the last successful backup has taken place.
  * `zfsbackup-client-exit-status` -- the exit status of the entire `zfsbackup-client` subshell that processed this data source. Currently, this is the sum of the exit statuses of `rsync` and all post-client processes.
 
-Other specific `rsync` options may be supported explicitly in future versions.
-
 You may place other files in `sources.d` directories (needed by custom pre- or
 post-client scripts, for example); they will be ignored by all scripts that
 don't know what they are.
 
 The defaults try to accommodate expected usage so that as little
-configuration as possible is necessary.
+configuration as possible is necessary (but it can still be a lot).
 
 Note that even without using the explicit multi-server support it's possible
 to upload the same source directory to several servers; just create separate
