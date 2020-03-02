@@ -5,15 +5,18 @@
 SOURCES=/etc/zfsbackup/sources.d
 DEFAULT_LOGFORMAT="%B %U:%G %M %l %o %i %C	%f%L"
 LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
-LOG_LEVEL_NAMES=(emerg alert crit err warning notice info debug)	# we also use these in syslog messages, so we have to use these specific level names
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 
 # An array we'll put the names of the servers we're asked to back up to in.
-typeset -a backupservers BACKUPSERVERS
+typeset -U backupservers BACKUPSERVERS
 typeset -A source_to_server # a hash whose keys are source names and whose values are servers names
 typeset -U sources_to_backup
 
+. $DEFAULT_FUNCTIONS
 # we source the config once here, to seed the backupservers array
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
 
 # The backupservers array will be overridden by servers specified on the command line; the all-capital BACKUPSERVERS array is specified in the config, which we re-source a number of times.
 # "backupservers" will default to the set of all configured servers:
@@ -26,31 +29,6 @@ zmodload zsh/datetime
 zmodload zsh/system
 
 me="zfsbackup-client"
-
-function log() { # prints message on stderr and logs it to syslog; used by the main program, outside the subshells that process specific backup sources (which do their own stdout/stderr handling)
-	local level=$1
-	local level_index=${LOG_LEVEL_NAMES[(ie)$level]}
-	local stderr=''
-	shift
-	if ((${LOG_LEVEL_NAMES[(ie)$LOG_LEVEL]}>=level_index)); then
-		# only write to stderr if it's a pipe or a terminal, or if the message is an actual error; TODO: maybe make this configurable too? Have a separate STDERR_LOGLEVEL?
-		if [[ $(stat -Lc '%F' /dev/stderr) = fifo ]] || test -t 2 || [[ $level_index -le ${LOG_LEVEL_NAMES[(ie)err]} ]]; then
-			stderr=--stderr
-		fi
-		logger $stderr --tag "$me" --id=$$ --priority user.$level -- "$@"
-	fi
-}
-	
-function die() { # logs high-priority message, then exits the script with an error
-	log emerg "$@"
-	exit 111
-}
-
-function start_logger() {
-	# starts a logger coprocess if one doesn't exist already
-	[[ -z "$have_logger" ]] && coproc logger --id -t "zfsbackup: $zbSOURCENAME"
-	have_logger=1
-}
 
 function update_metadata() { # fetches source related metadata from current directory and exports it in environment variables
 	if [[ -z "$preclient_exit" ]]; then # running for first time
@@ -82,6 +60,7 @@ function update_metadata() { # fetches source related metadata from current dire
 
 function process_source() { # handles backup of a single sources.d directory; calls itself for subjobs, if any
 	local zbSOURCENAME="$1"
+	local me="zfsbackup: $zbSOURCENAME"
 	# we have to source the config here so that $BACKUPSERVER
 	# can be expanded in it where needed
 	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
@@ -121,7 +100,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 	[[ -e no-xdev ]] || rsync_options=($rsync_options -x)
 	[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
 	[[ -r password ]] && rsync_options=($rsync_options --password-file="$(pwd)/password")
-	[[ -r timelimit ]] && timelimit=(timeout -k 5 "$(<timelimit)") || unset timelimit
+	[[ -r timelimit ]] && timelimit=(timeout --foreground -k 5 "$(<timelimit)") || unset timelimit
 	[[ -r timeout ]] && rsync_options=($rsync_options --timeout="$(<timeout)") \
 		|| rsync_options=($rsync_options --timeout=3600)
 	[[ -r username ]] && export LOGNAME=$(head -n 1 username)
@@ -199,7 +178,15 @@ function process_source() { # handles backup of a single sources.d directory; ca
 					sleep 0.5
 				done
 				if [[ "$cdsuccess" = "1" ]]; then
-					[[ -f "$zbSOURCENAME/no-recursive" ]] || rsync_options=($rsync_options --recursive)	# the no-recursive flag file can be created and removed dynamically by pre-client scripts; the point of performing a non-recursive backup of "." is to force a server-side snapshot to be created without traversing the (presumably unchanged) local fs
+					if [[ -f "$zbSOURCENAME/no-recursive" ]]; then
+						echo "$0: INFO: Only performing pro forma sync as 'no-recursive' flag exists." >&2
+						local -a delete=(--delete -d --dirs --recursive --delete-excluded)
+						rsync_options=(${rsync_options:|delete})	# rsync will error out if --delete passed without --recursive
+						export RSYNC_OPTIONS="${(F)rsync_options[@]}"	# re-export because the options just changed
+					else
+						rsync_options=($rsync_options --recursive)	# the no-recursive flag file can be created and removed dynamically by pre-client scripts; the point of performing a non-recursive backup of "." is to force a server-side snapshot to be created without traversing the (presumably unchanged) local fs
+						export RSYNC_OPTIONS="${(F)rsync_options[@]}"	# re-export because the options just changed
+					fi
 					$timelimit rsync --links --perms --times --group --owner --devices --specials $rsync_options[@] . "$url"
 					rsync_exit="$?"
 					echo $rsync_exit >"$zbSOURCENAME/rsync-exit-status"
@@ -216,7 +203,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 						echo "rsync returned $rsync_exit" >"$zbSOURCENAME/stamp-failure"
 					fi
 				else
-					echo "$0: FATAL: unable to chdir to $mypath." >&2
+					echo "$0: FATAL: unable to chdir to $mypath." >&2 >"$zbSOURCENAME/stamp-failure"
 					rsync_exit=111
 				fi
 			fi
