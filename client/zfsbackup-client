@@ -96,7 +96,19 @@ function process_source() { # handles backup of a single sources.d directory; ca
 	[[ -e no-inplace ]] && ! [[ -e no-sparse ]] && rsync_options=($rsync_options -S)
 	[[ -e no-partial ]] || rsync_options=($rsync_options --partial)
 	[[ -e no-xattrs ]] || rsync_options=($rsync_options -X)
-	[[ -e no-xdev ]] || rsync_options=($rsync_options -x)
+	# determine whether to set -x (to avoid traversing mountpoints). Logic:
+	# * if no-xdev is set explicitly, we don't add -x
+	# * if recurisve-snapshot exists, but subsources.d doesn't, we don't add -x
+	# * if recursive-snapshot exists, and so does subsources.d, we add -x, because we assume the subsources will cause sub-filesystems to be backed up
+	# * if subsources.d exists without recursive-snapshot, we add -x because adding -x has been the default
+	# * if xdev exists, we add -x
+	if ! [[ -e no-xdev ]]; then
+		if [[ -e xdev ]]; then
+			rsync_options=($rsync_options -x)
+		elif [[ -e recursive-snapshot ]] && [[ -d subsources.d/. ]]; then
+			rsync_options=($rsync_options -x)
+		fi
+	fi
 	[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
 	[[ -r password ]] && rsync_options=($rsync_options --password-file="$(pwd)/password")
 	[[ -r timelimit ]] && timelimit=(timeout --foreground -k 5 "$(<timelimit)") || unset timelimit
