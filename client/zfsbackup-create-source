@@ -139,18 +139,23 @@ while [[ -n "$1" ]]; do
 			zbBIND="1"
 			;;
 		-z|--zsnap)
-			zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/set-path-to-latest-zfs-snapshot")
+			((SNAP_CREATION_REQUESTED)) || zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/set-path-to-latest-zfs-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
 			zbPATH_IS_ZFS="1"
 			;;
 		-s|--snap)
-			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")
-			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot")
+			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")	# if --zsnap was processed sooner, this script was added, but we must remove it
+			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
 			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
+			SNAP_CREATION_REQUESTED=1 # used by --zsnap handler
 			;;
 		-rs|--rsnap)
-			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")
-			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot")
+			# TODO: set up backups of sub-filesystem as sub-jobs --
+			# * but since the set can change, this should be done from pre-client
+			# * but since pre-client can't create server-side filesystems, it should just alert and maybe cause the backup to be partial
+			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")	# if --zsnap was processed sooner, this script was added, but we must remove it
+			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
 			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
+			SNAP_CREATION_REQUESTED=1 # used by --zsnap handler
 			export zbRECURSIVESNAPSHOT=1; zbNOXDEV="1"; zbFORCEXDEV="0"
 			;;
 		--server)		shift;	backupservers=(${=1//,/ });;
@@ -364,7 +369,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		mkdir -p $zbSOURCENAME/pre-client.d
 		ln -sf $zbLNPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
 	fi
-	if [[ -n "$zbPOSTCLIENT" ]];
+	if [[ -n "$zbPOSTCLIENT" ]]; then
 		mkdir -p $zbSOURCENAME/post-client.d
 		cp -a $zbPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
 	fi
@@ -380,7 +385,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
 	[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
 	[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
-	((zbRECURSIVESNAPSHOT)) echo 1 >$zbSOURCENAME/recursive-snapshot
+	((zbRECURSIVESNAPSHOT)) && echo 1 >$zbSOURCENAME/recursive-snapshot
 	flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
 	flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
 	flagfile "$zbNODELETEEXCLUDED" "$zbFORCEDELETEEXCLUDED" no-delete-excluded
