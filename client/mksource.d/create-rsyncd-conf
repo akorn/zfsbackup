@@ -1,5 +1,7 @@
 #!/bin/zsh
 
+# TODO: if creating recursive backups of a tree of filesystems, add "-r" to make-snapshot invocation
+
 # defaults
 REMOTEBACKUPPOOL=backup         # first path component on remote server, e.g. /backup
 REMOTEBACKUPPATH="$(hostname)"  # 2nd path component on remote server, e.g. /backup/thishost
@@ -40,6 +42,7 @@ read only = false
 write only = true
 post-xfer exec = /var/lib/svn-checkout/misc-scripts/zfsbackup/server/make-snapshot
 auth users = $zbUSERNAME
+max connections = 1
 $nofakesuper
 EOF
 
@@ -54,6 +57,7 @@ hosts allow = $CLIENTNAME
 read only = true
 write only = false
 auth users = $RESTOREUSER
+max connections = 1
 $nofakesuper
 EOF
 }

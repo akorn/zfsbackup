@@ -1,5 +1,9 @@
 #!/bin/zsh
 
+# TODO:
+# * when backing up a zfs structure recursively, also create a similar tree structure on the backup server
+# * add way to override CREATEREMOTEZFS from command line (maybe introduce a plugin system instead of mksource.d to facilitate this)
+
 REMOTEBACKUPPOOL=backup
 REMOTEBACKUPPATH="$(hostname)"
 BACKUPOWNER=nobody:nogroup
