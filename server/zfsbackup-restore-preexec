@@ -3,8 +3,8 @@
 # Part of "zfsbackup" (https://github.com/akorn/zfsbackup). Copyright (c) András Korn, 2019. License: GPLv3
 #
 # Purpose: make it easier and friendlier to retrieve earlier backups from a zfsbackup server.
-# Called as an rsync pre-xfer script, this script populates the directory pointed to be $RSYNC_MODULE_PATH with a set of directories that correspond to snapshots of a zfs instance (given either on the command line or in a config file).
-# The directories are named after the snasphots; the script also creates symlinks to the directories; the names of the symlinks are the snapshots' creation dates (both in human-readable and in epoch second format). (TODO: do something sensible of two snapshots were created in the same second. Currently, the 2nd symlink is just not created.)
+# Called as an rsync pre-xfer script, this script populates the directory pointed to by $RSYNC_MODULE_PATH with a set of directories that correspond to snapshots of a zfs instance (given either on the command line or in a config file).
+# The directories are named after the snasphots; the script also creates symlinks to the directories; the names of the symlinks are the snapshots' creation dates (both in human-readable and in epoch second format). (TODO: do something sensible if two snapshots were created in the same second. Currently, the 2nd symlink is just not created.)
 # If the user tries to download from one of the directories (or symlinks), the corresponding snapshot is bind-mounted under the pertinent directory. If there are sub-filesystems that have the same snapshot, those are also bind-mounted in the appropriate subdirectory of the main bind mount.
 # Additionally, the client can request paths of the form /before-somedate/ and /after-somedate/; in these cases the pre-xfer script finds the latest snapshot from before "somedate" (or the earliest one after "somedate") and binds mounts it as above, creating a symlink to it with the name the client requested. "Somedate" can be anything "date --date" understands; for example, "/after-last tuesday/" or "/before/2017-01-01/". However, slashes are not allowed in the date.
 #

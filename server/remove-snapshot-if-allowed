@@ -31,7 +31,8 @@ zfs get -Hp -o value name "$1" 2>/dev/null >/dev/null || exit 0
 
 # Obtain an exclusive lock to avoid race conditions arising from several concurrent instances of this script
 # trying to remove different snapshots, making the decision whether we're about to remove the snapshot of the
-# last successful backup unpredictable.
+# last successful backup unpredictable. It would be better to use per-fs locks, but I need to think about the
+# implications for recursive snapshots and their removal.
 : >>$DESTROYLOCK
 if ! zsystem flock -f lockfd -t $LOCKTIMEOUT $DESTROYLOCK; then
 	die "unable to obtain lock on $DESTROYLOCK; not destroying $1."
