@@ -21,7 +21,6 @@ typeset -U sources_to_backup
 # The backupservers array will be overridden by servers specified on the command line; the all-capital BACKUPSERVERS array is specified in the config, which we re-source a number of times.
 # "backupservers" will default to the set of all configured servers:
 backupservers=($BACKUPSERVERS[@])
-[[ -z $backupservers[@] ]] && backupservers=("")	# maybe unnecessary -- make sure the array has at leas an empty element
 final_exit_status=0
 
 zmodload zsh/mapfile
@@ -308,13 +307,20 @@ if [[ -n "$1" ]]; then
 		shift
 	done
 else	# nothing on command line; back up everything
-	for BACKUPSERVER in $backupservers[@]; do
-		[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf	# value of SOURCES can depend on BACKUPSERVER
+	if [[ -n $backupservers ]]; then
+		for BACKUPSERVER in $backupservers[@]; do
+			[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf	# value of SOURCES can depend on BACKUPSERVER
+			for i in $SOURCES/*(/); do
+				sources_to_backup=($sources_to_backup[@] $i)
+				source_to_server[$i]=$BACKUPSERVER
+			done
+		done
+	else	# only a single, unnamed server exists
 		for i in $SOURCES/*(/); do
 			sources_to_backup=($sources_to_backup[@] $i)
-			source_to_server[$i]=$BACKUPSERVER
+			source_to_server[$i]=""
 		done
-	done
+	fi
 fi
 
 [[ -z "$sources_to_backup[@]" ]] && exit 0	# nothing to do
