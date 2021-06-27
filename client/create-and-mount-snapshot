@@ -278,10 +278,15 @@ function mount_zfs_snapshot() {	# usage: mount_zfs_snapshot fsname snapname fsmo
 		if [[ $mount_method = cd ]]; then
 			for i in {1..5}; do # This needs to be retried a few times because of some timing issue on some kernels
 				# switch to the directory to force it to become mounted
-				pushd "$zfs_mp/.zfs/snapshot/$snapname/." && popd && snap_mp="$zfs_mp/.zfs/snapshot/$snapname" && break
-				sleep 0.5
+				if pushd "$zfs_mp/.zfs/snapshot/$snapname/." && popd; then
+					break
+				else
+					sleep 0.5
+				fi
 			done
-		else	# we need to workaround "Object is remote" automount bug, or use mount(8) for some other reason
+		fi
+		snap_mp="$(findmnt -n -o TARGET $zfsdataset@$snapname)"	# Did the mount succeed? Is the snapshot mounted now?
+		if [[ -z "$snap_mp" ]]; then	# we need to workaround "Object is remote" or "Too many levels of symbolic links" automount bug, or use mount(8) for some other reason
 			tempdir=$(mktemp -d) || { log emerg "Failed to create temporary directory."; return 111 }
 			mountmsg=$(mount -t zfs $zfsdataset@$snapname $tempdir 2>&1)
 			ret=$?
@@ -315,12 +320,17 @@ function mount_zfs_snapshot() {	# usage: mount_zfs_snapshot fsname snapname fsmo
 function zfs_snapshot_postclient() {
 	local zfsdataset="$(<zfs-dataset)" msg ret final_ret
 	[[ -L path ]] || die "$(pwd)/path is not a symlink."
-	if mountpoint -q path/.; then
-		log debug "$(readlink -f path/.) is still mounted. Trying to umount."
-		msg=$(umount path >&2)
-		ret=$?
-		((ret)) && log err "Failed to umount $(readlink -f path/.): $msg ($ret). Continuing regardless."
-		((final_ret+=$ret))
+	local source=$(findmnt -n -o source $(readlink -f path) 2>/dev/null)
+	if [[ -n "$source" ]]; then	# We use findmnt instead of mountpoint -q because the latter will cause an automount attempt if path is a symlink that points to a zfs snapshot directory
+		if [[ "$source" =~ ^[^/].*@. ]]; then	# check to see if what's mounted is a zfs snapshot
+			log debug "$(readlink -f path/.) is still mounted. Trying to umount."
+			msg=$(umount path >&2)
+			ret=$?
+			((ret)) && log err "Failed to umount $(readlink -f path/.): $msg ($ret). Continuing regardless."
+			((final_ret+=$ret))
+		else
+			die "$source, which is mounted on $(readlink -f path/.), does not appear to be a zfs snapshot. This should not happen; aborting."
+		fi
 	fi
 	# If mount_method=mount (and not 'cd'), it means we created a temporary directory and mounted the snapshot in it explicitly. We can remove that temporary directory now.
 	[[ $mount_method = mount ]] && rmdir $(readlink -f path)
@@ -400,6 +410,13 @@ function recursive_zfs_snapshot_init() { # bits common to preclient and postclie
 			# if the entire zfs subtree has legacy mountpoints, with could assume the zfs hierarchy reflects a mount hierarchy and back them up like that regardless, but I expect that to be a very rare case
 			log info "Filesystems with legacy mountpoints are not supported for recursive snapshots; we won't include $i in the backup."	
 			nosnapshot=($nosnapshot[@] $i)
+		else
+			canmount="$(zfs get -Hp -o value canmount "$i")"
+			if [[ $canmount = off ]]; then
+				# if the origin fs can't be mounted, then its snapshot shouldn't be either
+				log debug "Skipping $i with canmount=off"
+				nosnapshot=($nosnapshot[@] $i)
+			fi
 		fi
 		[[ -z "$zfs_topmost_mp" ]] && zfs_topmost_mp=$zfs_mp
 		if [[ $zfs_mp[$i] = ${zfs_mp[$i]##$zfs_topmost_mp} ]]; then	# We try to cut off "zfs_topmost_mp" from the beginning of zfs_mp; if the result is the unchanged zfs_mp, then the mountpoint of this fs is not under our topmost mountpoint and we skip it.
@@ -412,7 +429,7 @@ function recursive_zfs_snapshot_init() { # bits common to preclient and postclie
 function recursive_zfs_snapshot_postclient() {
 	local i last_successful msg ret=0 final_ret=0
 	recursive_zfs_snapshot_init # sets $prefix, $zfsdataset, $nosnapshot, $zfs_instances, ...
-	if mountpoint -q path; then	# It's impossible we're running concurrently with another backup job because zfsbackup-client enforces mutual exclusion; thus this is safe
+	if [[ -n $(findmnt -n -o source $(readlink -f path) 2>/dev/null) ]]; then	# It's impossible we're running concurrently with another backup job because zfsbackup-client enforces mutual exclusion; thus this is safe. We use findmnt instead of mountpoint -q because the latter will cause an automount attempt if path is a symlink that points to a zfs snapshot directory
 		# Technically, it's possible that path itself isn't a mountpoint, but a subdirectory is -- we don't have to care about that, but (TODO) it would be nice to print a warning
 		msg=$(umount -R path >&2)
 		ret=$?
@@ -484,7 +501,7 @@ postclient=0
 [[ "$1" = <-> ]] && postclient=1	# if $1 is a number, we're being called as a post-client script
 [[ "${0:t}" = umount-and-destroy-snapshot ]] && postclient=1	# the name is also a strong hint
 mount_method=cd
-[[ -f /sys/module/zfs/version ]] && grep -q '^0\.8\.[23]' /sys/module/zfs/version && mount_method=mount	# these versions can't automount some snapshots and report "Object is remote", but mounting them via mount(8) works
+[[ -f /sys/module/zfs/version ]] && grep -q '^0\.8\.[2345]' /sys/module/zfs/version && mount_method=mount	# these versions can't automount some snapshots and report "Object is remote", but mounting them via mount(8) works
 
 if [[ -e logicalvolume ]]; then # this is case #4 explained above.
 	lvm_snapshot
