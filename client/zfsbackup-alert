@@ -1,0 +1,76 @@
+#!/bin/zsh
+#
+# This script can be called from e.g. cron to periodically check for:
+#
+# * backups that were last successful >n days ago
+# * backups that failed
+# * (zfs) filesystems that are apparently not being backed up (this is based on OOB information, thus not entirely reliable)
+# * planned: backup jobs that might be stuck (running for more than n hours)
+#
+# Alerts (for now) go to standard error; it is up to cron to send them to the administrator.
+
+SOURCES=/etc/zfsbackup/sources.d
+LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
+USE_SYSLOG=1
+DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
+
+ALERT_LAST_SUCCESSFUL_DAYS=7	# By default, send alerts for filesytems whose backups last completed successfully 7+ days ago. Set to 0 to disable.
+ALERT_FAILED=0			# By default, don't explicitly alert for failed backups (if they keep failing, we'll alert eventually due to a lack of success).
+ALERT_NO_BACKUP=1		# By default, look for filesystems that have no backups configured. Set to 0 to disable.
+
+. $DEFAULT_FUNCTIONS
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+
+USE_SYSLOG=0			# when we use the log() function, we only want to write to stderr, not syslog -- the idea is for the messages to be mailed to root
+
+if ((ALERT_LAST_SUCCESSFUL_DAYS)); then
+	local -A backup_success
+	local date src
+	find $SOURCES/ -xdev -name "stamp-success" -mtime +$ALERT_LAST_SUCCESSFUL_DAYS -printf "%TF %h\n" | while read -r date src; do
+		backup_success[$src]=$date
+	done
+	find $SOURCES/ -xdev -type d | while read d; do
+		if [[ -e $d/url ]]; then
+			if ! [[ -e $d/stamp-success ]]; then
+				backup_success[$src]=never
+			fi
+		fi
+	done
+	if [[ -n "$date" ]]; then
+		echo "Warning: the following backups have not succeeded in at least $ALERT_LAST_SUCCESSFUL_DAYS days:\n"
+		{
+			echo "config directory\tdate of last successful backup"
+			for i in ${(k)backup_success}; do
+				echo "$i\t"$backup_success[$i]
+			done
+		} | column -s "	"
+		echo
+	fi
+fi
+
+if ((ALERT_FAILED)); then
+	local -A backup_fail
+	local date src
+	find $SOURCES/ -name "stamp-failure" -printf "%TF %h\n" | while read -r date src; do
+		backup_fail[$src]=$date
+	done
+	if [[ -n "$date" ]]; then
+		echo "Warning: the last backup of the following filesystems failed:\n"
+		{
+			echo "config directory\tdate of failure"
+			for i in ${(k)backup_fail}; do
+				echo "$i\t"$backup_fail[$i]
+			done
+		} | column -s "	"
+		echo
+	fi
+fi
+
+if ((ALERT_NO_BACKUP)); then
+	local -U no_backup=($(zfs get -o name,property all -t filesystem,volume -s inherited | egrep "$PROPPREFIX:(.*:)?config" | sed -r "s/[[:space:]]*$PROPPREFIX:(.*:)?config.*//"))
+	if [[ -n "$no_backup" ]]; then
+		echo "Warning: the following zfs instances/volumes appear to have no backups configured (based on their zfs properties):"
+		echo ${(j:\n:)no_backup}
+	fi
+fi
