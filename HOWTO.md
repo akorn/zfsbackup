@@ -237,9 +237,9 @@ zfs get -o name,property all -t filesystem,volume -s inherited | fgrep korn.zfsb
 
 ## Backing up servers that run LXC containers
 
-I set up LXC containers in a very specific way and wrote a script to configure up backups for all of them.
+I set up LXC containers in a very specific way and will write a script to set up backups for all of them.
 
-Assumptions in case you also want to use my script:
+Assumptions:
 
  * All the lxc stuff lives under the a somepool/path zfs dataset.
  * All lxc guests have filesystems like `somepool/path/guest`, `somepool/path/guest/rootfs`, `somepool/path/guest/rootfs/{tmp,var}`, `somepool/path/guest/rootfs/{srv,srv/somedata}`.
@@ -247,6 +247,65 @@ Assumptions in case you also want to use my script:
  * You want similar sub-filesystems to be created on the backup server (separate `rootfs`, `rootfs/var` mounted under it, and os on).
   * This makes restoring from the latest backup very straightforward but still allows e.g. different dedup settings for `rootfs` and `rootfs/var`.
   * Note that restoring from earlier backup snapshots will only be possible either on a per-filesystem basis, or by using bind mounts to create the appropriate hierarchy of mountpoints, constructed from the snapshots, on the backup server.
+
+## Setting up a backup with sub-sources manually
+
+Since there isn't scripted support for this yet, here is how to set it up manually. (Eventually, these instructions will help me write the pertinent script.)
+
+Example 1: a laptop called luna
+
+Assume we have the following filesystems on the client:
+
+```
+NAME                    CANMOUNT  MOUNTPOINT
+bpool                   off       /
+bpool/BOOT              off       none
+bpool/BOOT/debian-1     noauto    legacy
+luna                    off       /
+luna/ROOT               off       /ROOT
+luna/ROOT/debian-1      noauto    /
+luna/ROOT/debian-1/var  on        /var
+luna/fscache            -         -
+luna/home               on        /home
+luna/swap1              -         -
+luna/tmp                on        /tmp
+luna/var                off       /var
+luna/var/cache          on        /var/cache
+luna/var/log            on        /var/log
+luna/var/log/sv         on        /var/log/sv
+luna/var/spool          on        /var/spool
+luna/var/tmp            on        /var/tmp
+```
+
+The bpool is straightforward; it only contains a single mounted filesystem, which is small and changes rarely. It doesn't need special attention.
+
+ 1. Create the requisite filesystems for the `luna` pool on the server:
+
+```
+zfs create -o dedup=on	backup/luna 		# This will be where we back up luna/ROOT/debian-1 to
+zfs create -o dedup=off backup/luna/home	# dedup=off because otherwise it would inherit the dedup property
+zfs create -o dedup=off backup/luna/var		# This is for luna/ROOT/debian-1/var; luna/var is not mountable
+zfs create		backup/luna/var/cache
+zfs create		backup/luna/var/log
+zfs create		backup/luna/var/log/sv
+zfs create		backup/luna/var/spool
+```
+
+ 2. Create and populate the top-level sources.d directory on the client:
+
+   * `mkdir -p /etc/zfsbackup/BACKUPSERVER/sources.d/luna`
+   * Create `username`, `password`, `url`, `recursive-snapshot`; other configfiles (e.g. `exclude`) as needed.
+   * Create zfs-dataset-root: `echo luna >/etc/zfsbackup/BACKUPSERVER/sources.d/luna/zfs-dataset-root`
+   * Don't create `no-xdev`.
+   * Create `path`: mkdir /etc/zfsbackup/BACKUPSERVER/sources.d/luna/pat
+   * `echo luna > /etc/zfsbackup/BACKUPSERVER/sources.d/luna/zfs-dataset`
+   * `mkdir -p /etc/zfsbackup/BACKUPSERVER/sources.d/luna/subsources.d`
+   * `zfsbackup-create-source -p luna/ROOT/debian-1/var -z -d luna/subsources.d/var` etc.
+   * Make sure `set-path-to-latest-zfs-snapshot` is not enabled for any sub-source; check-if-changed-since-snapshot should be, though.
+   * Make sure that on the server side, the rsync stanza for the rootfs will invoke `make-snapshot` with `-r`.
+    * You probably also want to make sure that the other stanzas don't invoke it at all; otherwise, all backups of the hirearchy will create multiple snapshots of destination filesystems of sub-sources.
+    * TODO: make sure somehow that even with client-side parallelism, no backups started later than the one that created the initial recursive snapshot can mess up the server-side data, so that the recursive snapshot we create on the server side after the backup is really consistent.
+    * TODO: provide a mechanism for make-snapshot to be invoked if a subsource is backed up separately.
 
 ## Scheduling backups
 
