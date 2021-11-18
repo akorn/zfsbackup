@@ -5,6 +5,8 @@
 # TODO: if --no-xdev was specified, also set it on all child filesystems -- maybe? But what if most of those are going to be excluded manually?
 # It's unclear what the right thing to do is.
 
+[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+
 if [[ -n "$zbZFSDATASET" ]]; then
 	echo setting ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" on "$zbZFSDATASET"... >&2
 	zfs set ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" "$zbZFSDATASET"
