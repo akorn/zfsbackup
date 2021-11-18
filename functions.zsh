@@ -1,6 +1,6 @@
 # common functions used by zfsbackup components; sourced by zsh scripts
 
-PROPPREFIX=korn.zfsbackup						# a hopefully sensible default configfiles can override
+export PROPPREFIX=${PROPPREFIX:-korn.zfsbackup}				# a hopefully sensible default that configfiles and the invocation environment can override
 LOG_LEVEL_NAMES=(emerg alert crit err warning notice info debug)	# we also use these in syslog messages, so we have to use these specific level names
 
 function start_logger() { # starts a logger coprocess if one doesn't exist already
