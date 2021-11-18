@@ -44,6 +44,7 @@ post-xfer exec = /var/lib/svn-checkout/misc-scripts/zfsbackup/server/make-snapsh
 auth users = $zbUSERNAME
 max connections = 1
 $nofakesuper
+lock file = /run/lock/rsync.$BACKUPMODULE.lock
 EOF
 
 RESTOREMODULE="${BACKUPMODULE/backup_/restore_}"
@@ -59,6 +60,7 @@ write only = false
 auth users = $RESTOREUSER
 max connections = 1
 $nofakesuper
+lock file = /run/lock/rsync.$RESTOREMODULE.lock
 EOF
 }
 
