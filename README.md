@@ -35,6 +35,27 @@ I chose to still write `zfsbackup` for the following reasons:
    * Some of the snapshot logic pertaining to backups would have to live on the client; that is, it would need to be the client that creates "yearly", "monthly", "weekly" and "daily" snapshots which it then sends to the backup server. This isn't objectively good or bad, but it's not what I prefer: I want the client to just push its backups to the server automatically, preferably daily, and for the retention policy to be configurable centrally on the backup server.
  * Initially, I thought the entire solution could be kept simple. :) While I try not to succumb to feeping creaturism, I admit I had to abandon this idea; both the client and the server are shaping up to be more complex than initially anticipated.
 
+### Why not just use `borg` with `borgmatic`?
+
+Borg is a very good backup solution and, since it can encrypt your data on
+the client side, I would absolutely recommend using it if you're backing up
+to a server you do not trust.
+
+Coupled with `borgmatic`, `borg` has many of the features zfsbackup offers. 
+I may even add support for borg instead of rsync to zfsbackup, so that you
+can benefit from the various zfsbackup support scripts (such as
+`create-and-mount-snapshot`) while using borg.
+
+One of the things zfs (and thus zfsbackup) can do and borg can't is share
+deduplication data between datasets. For example, if you back up a large
+number of similar chroot environments (linux-vserver guests, LXC containers)
+from several physical hosts to a single zfsbackup server, you can
+efficiently deduplicate their contents. With borg, you'd need to send your
+backups into different archives in the same repository to do this, which,
+IIUC, is on the one hand not recommended for performance reasons, and on the
+other is impractical because only a single client can write to the same
+repository at the same time.
+
 ## Reference Manual
 
 See `HOWTO.md` for quick start instructions; the information presented below
@@ -42,24 +63,24 @@ is intended more as a reference.
 
 The `zfsbackup` system consists of the following macroscopic components:
 
- 1. A client (`zfsbackup-client`) with a bunch of support scripts. These support scripts can create snapshots before running a backup, for example; `zfsbackup-create-source` helps automate initial backup configuration.
+ 1. A client program (`zfsbackup-client`) with a bunch of support scripts. These support scripts can, for example, create snapshots before running a backup; `zfsbackup-create-source` helps automate initial backup configuration.
  2. Client-side configuration. There are some global config items, and each backup job has its own configuration. Typically you'd have one backup job per origin filesystem and backup server; e.g. "back up `/home` to `server1`" would be one job. `zfsbackup` calls these jobs "sources".
  3. An `rsync` server with zfs storage.
  4. Server side scripts:
    * `make-snapshot`, to be called by `rsync`, creates a snapshot when a backup transfer completes, setting various zfs properties.
    * `zfsbackup-expire-snapshots` looks for expired snapshots of backups and removes them.
-   * `zfsbackup-restore-preexec` provides a client with a virtual view of all existing backup snaphots, which can be downloaded from via `rsync`.
+   * `zfsbackup-restore-preexec` provides a client with a virtual view of all existing backup snaphots (including snapshots of child filesystems), which can be downloaded from via `rsync`.
  5. Some client-side mechanism that schedules backups (two solutions are provided: one for `cron`, one for `runit` or similar service supervisors).
 
 ### Client side
 
-The `client` subdir of the project contains the script that runs on
-the client side, called `zfsbackup-client`.
+The `client` subdir of the project contains, most importantly, the main the
+script that runs on the client side, called `zfsbackup-client`.
 
 In the simplest case where you only have one backup server, it first reads
 defaults from `/etc/zfsbackup/client.conf`, then iterates over the
 directories in `/etc/zfsbackup/sources.d`, each of which pertains to a
-directory tree to be backed up.
+directory tree (normally, the root of a mounted filesystem) to be backed up.
 
 Normally, `sources.d` directories aren't created manually but by the
 `zfsbackup-create-source` script.
@@ -84,11 +105,11 @@ of which are optional, and most of which control the behaviour of `rsync`:
  * `no-delete` -- if it exists, `--delete` will not be passed to `rsync` (except if it occurs in `options`). The default is to delete remote files that are no longer present locally. By default, this includes excluded files; see `no-delete-excluded` to turn that off.
  * `no-delete-excluded` -- if it exists, `--delete-excluded` will not be passed to rsync (except if it occurs in `options`). The default is to delete excluded files from the backup.
  * `no-hard-links` -- if it exists, `-H` will not be passed to `rsync` (except if it occurs in `options`). The default is to reproduce hardlinks.
- * `no-inplace` -- if it exists, `--inplace` will not be passed to `rsync` (except if it occurs in `options`). In-place updates are probably more space efficient with zfs snapshots unless dedup is also used, and thus are turned on by default.
+ * `no-inplace` -- if it exists, `--inplace` will not be passed to `rsync` (except if it occurs in `options`). In-place updates are probably more space efficient with zfs snapshots unless dedup is also used (but see below), and thus are turned on by default.
  * `no-partial` -- if it exists, `--partial` will not be passed to `rsync` (except if it occurs in `options`). The default is to use partial transfers.
  * `no-recursive` -- if it exists, the arguments to `rsync` won't include `--recursive` (so that only the attributes of the `.` directory will be actually transferred). This is useful to force server-side snapshots to be created as if a backup had taken place, without calling `stat()` on all files and directories in the source filesystem. The `check-if-changed-since-snapshot` pre-client script can create and remove the `no-recursive` flag file as needed.
  * `no-snapshot` -- can contain a list of zfs datasets that should be excluded from recursive snapshotting and mounting by the `create-and-mount-snapshot` pre-client script.
- * `no-sparse` -- if it exists, `-S` will not be passed to `rsync` (except if it occurs in `options`). `-S` is the default if `no-inplace` exists (rsync doesn't support inplace and sparse simultaneously.)
+ * `no-sparse` -- if it exists, `-S` will not be passed to `rsync` (except if it occurs in `options`). `-S` is the default if `no-inplace` exists (rsync doesn't support inplace and sparse simultaneously.) `-S` should not be enabled lightly; it can slow down transfers tremendously. It's probably better to enable compression in rsync as well as on the target filesystem.
  * `no-xattrs` -- if it exists, `-X` will not be passed to `rsync` (except if it occurs in `options`). The default is to copy xattrs.
  * `no-xdev` -- if it exists, `-x` will not be passed to `rsync` (except if it occurs in `options`). The default is *not* to cross mountpoint boundaries. (The "xdev" name was inspired by the `--xdev` option to `find(1)`.)
  * `options` -- further options to pass to `rsync`, one per line. The last line should not have a trailing newline.
@@ -110,11 +131,14 @@ of which are optional, and most of which control the behaviour of `rsync`:
  * `url` -- rsync URL to upload to (single line; subsequent lines are ignored). `zfsbackup-client` obtains an exclusive lock on this file before processing the directory, ensuring that no two instances can work on the same source simultaneously. If you remove and re-create the url file while a backup is in progress, mutual exclusion can't be guaranteed.
  * `username` -- username to send to `rsyncd`
  * `zfs-dataset` -- used by the `set-path-to-latest-zfs-snapshot` pre-client script; it finds the latest snapshot of the ZFS dataset named in `zfs-dataset`, then makes `path` a symlink to it before invoking `rsync` on `path`. The `create-and-mount-snapshot` script uses it as well to find out what zfs dataset to snapshot.
+ * 'zfs-dataset-root' -- used by the `create-and-mount-snapshot` script when `recursive-snapshot` exists. In this case, `zfs-dataset` is the particular dataset whose contents should be backed up, but `zfs-dataset-root` is the one that needs a recursive snapshot taken first. This is needed if, for example, backing up an entire installation, where the dataset that contains the rootfs is not the logical parent of all other zfs datasets.
  * `zvol` -- used by `create-and-mount-snapshot` helper script; should contain the name of a zvol whose snapshot should be created and mounted under `path/` before rsync is run. This functionality isn't completely implemented yet and thus can't be used.
+
+> A note about `--inplace` vs. zfs: by default, overwriting a file on zfs causes new blocks to be allocated for it and the old blocks freed. If you overwrite a 10GB-file with itself, the snapshot diff between the previous snapshot and the next one will include the entire file even though it hasn't changed. Using `--inplace` is one way to ensure that the snapshot diff will be minimal. However, zfs also supports so called "NOP writes" (see https://openzfs.org/wiki/Features#nop-write), where it detects that new data being written is the same as the previous data and doesn't actually perform the write. IIUC, for this to happen, compression (any compression) must be enabled on the target dataset, and it must use a stronger-than-default hash like sha256, sha512, edonr, or skein. The checksum algorithm should be set on filesystem creation and left alone afterwards to get the maximum benefit.
 
 Other specific `rsync` options may be supported explicitly in future versions.
 
-Additionally, the `zfsbackup` scripts can create the following files:
+Additionally, the client-side `zfsbackup` scripts can create the following files:
 
  * `check-exit-status` -- the exit status of the `./check` script when it was last run.
  * `last-backed-up-snapshot-creation` -- the creation date (in epoch seconds) of the snapshot we last tried to back up. Currently only supported/created for zfs. The mtime of this file is set to the date it contains.
@@ -127,7 +151,7 @@ Additionally, the `zfsbackup` scripts can create the following files:
  * `pre-client.d-exit-status` -- the exit status of `run-parts --report ./pre-client.d` when it was last run.
  * `rsync-exit-status` -- the exit status of the rsync process itself, from when it last completed (if rsync is currently running, the file may exist but will contain the exit status of the previous instance).
  * `stamp-failure` -- created and its timestamp updated whenever a backup is attempted but fails. Removed when a backup succeeds. Can be used to find datasets that weren't backed up successfully. Contains a brief message that indicates why the client thinks the backup failed.
- * `stamp-success` -- created and its timestamp updated whenever a backup completes successfully. Can be used to check when the last successful backup has taken place.
+ * `stamp-success` -- created and its timestamp updated whenever a backup completes successfully. Can be used to check when the last apparently successful backup has taken place.
  * `zfsbackup-client-exit-status` -- the exit status of the entire `zfsbackup-client` subshell that processed this data source. Currently, this is the sum of the exit statuses of `rsync` and all post-client processes.
 
 You may place other files in `sources.d` directories (needed by custom pre- or
@@ -154,20 +178,23 @@ time), it's easy to have whatever mechanism you use to schedule
 even just start `n` copies in the background to run `n` parallel backups and
 rely on the built-in locking for mutual exclusion.
 
-If you invoke `zfsbackup-client` with command line arguments, each is taken to
-be the path to a source.d style directory; absolute paths are processed as
-is, relative ones are interpreted relative to `/etc/zfsbackup/sources.d` (or
-whatever `SOURCES` is set to in the config). If you have several backup servers
-configured, relative arguments are matched against the SOURCES directory of
-each server.
+If you invoke `zfsbackup-client` with command line arguments other than
+`--server servertag`, each argument is taken to be the path to a source.d
+style directory; absolute paths are processed as is, relative ones are
+interpreted relative to `/etc/zfsbackup/sources.d` (or whatever `SOURCES` is
+set to in the config). If you have several backup servers configured,
+relative arguments are matched against the SOURCES directory of each server.
 
-#### exit status
+#### Exit status
 
 The client script runs all jobs related to each source in a subshell and
 accumulates the exit statuses of all such subshells, then sets its own exit
 status to that.
 
 The accumulation is currently not capped, so I suppose it can overflow.
+
+(TODO: maybe use the highest exit code of any child process for the main
+process?)
 
 #### client.conf
 
@@ -176,7 +203,9 @@ their current defaults):
 
 ##### single-server case
 
-This is a minimal, simple configuration.
+This is a minimal, simple configuration. If you plan on having more than one
+server at any time in the future, it is recommended that you use a
+multi-server configuration template from the beginning.
 
 ```zsh
 # Path to sources.d directory:
@@ -287,7 +316,8 @@ exclude include files filter check pre-client post-client options stdout stderr
 ```
 
 These files, if they exist in /etc/zfsbackup/client-defaults, will be copied
-into the new sources.d dir, not hardlinked. Existing files will not be
+into the new sources.d dir, not hardlinked (so you can customize them
+without affecting other backup sources). Existing files will not be
 overwritten with defaults, but will be overwritten with values explicitly
 given on the command line.
 
@@ -332,6 +362,11 @@ directory being backed up).
 		As of now, recursive snapshot support is most useful for
 		backups with no-xdev, where an entire client-side zfs subtree is
 		backed up to a single server-side filesystem.
+--subsources	NOT IMPLEMENTED YET. Will be used to request that the zfs
+		hierarchy root and all its child filesystems be backed up
+		recursively into individual destination filesystems whose
+		hierarchy exactly matches the source filesystem hierarchy,
+		using the sub-source mechanism explained below.
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).
 		Use only -d if you're reconfiguring an existing sources.d dir.
@@ -412,12 +447,12 @@ example:
 When backing something like this up, the following features are desirable:
 
  * Since the sub-filesystems can be interdependent, they might only be meaningfully consistent when snapshotted together, atomically.
- * Ideally, what's a separate fs on the client would be a separate fs on the server (to have the appropriate property set, especially concerning compression and dedup).
- * The filesystem layout on the server should be similar to the one on the client (i.e. if `bar` is a mounted under `/foo/bar` on the client, its backup should be mounted under something like `/backup/box/foo/bar`). This makes browsing the backups manually more natural and intuitive.
+ * Ideally, what's a separate fs on the client would be a separate fs on the server (to have the appropriate property set, especially concerning compression and dedup, but also zfsbackup specific properties such as `mininodes` and `minsize`).
+ * The filesystem layout on the server should be similar to the one on the client (i.e. if `bar` is mounted under `/foo/bar` on the client, its backup should be mounted under something like `/backup/box/foo/bar`). This makes browsing the backups manually more natural and intuitive.
  * The server should take a recursive snapshot of the entire zfs subtree when the backup is complete, not (or not only) separate snapshots of each sub-filesystem.
  * It should be possible to restore the client to a specific backup with a single recursive rsync operation; that is, the server should be able to provide a hierarchical view of the snapshots of `foo` and `bar` such that `bar@snapshot` is mounted under `foo@snapshot/bar`. (This is implemented by the `zfsbackup-restore-preexec` and `zfsbackup-restore-postexec` scripts shipped with `zfsbackup`.)
  * Ideally, it should still be possible to take a separate ad-hoc backup of e.g. `/lxc/guest1/rootfs/home`, but for the purposes of scheduled backups, this fs shouldn't be backed up separately, only as part of its hierarchy.
- * Ideally, it should be possible to skip backups of individual sub-filesystems if they didn't change since the last backup.
+ * Ideally, it should be possible to skip backups of individual sub-filesystems if they haven't changed since the last backup.
    * Even more ideally, a new server-side snapshot should still be created of them even in this case.
 
 Without sub-sources you could go about it this way:
@@ -425,23 +460,26 @@ Without sub-sources you could go about it this way:
  * Have a single `sources.d` directory on the client for the entire subtree.
    * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
    * Don't set up separate write-only rsync modules for the lower elements of the hierarchy on the server; use `no-xdev` on the client to traverse the entire subtree.
+   * If you want to use the `check-if-changed-since-snapshot` pre-client script, you have to modify it to also be recurisve (patches welcome!).
  * Create separate filesystems on the backup server and arrange them in the same hierarchy they're in on the client (TODO: write a helper script for this.)
  * Make sure the backupserver creates a recursive snapshot when the backup of the topmost directory is finished (add `-r` to the `make-snapshot` command line in `post-xfer exec`).
-   * Make sure the topmost directory is backed up last (there is currently no mechanism for this, but one could be invented).
- * Symlink the `check-if-changed-since-snapshot` pre-client script into all your pertinent `sources.d` directories.
- * Set up a separate sources.d-style directory and an accompanying server-side rsync module for `/lxc/guest1/rootfs/home` (and any other filesystems you want to be able to back up separately); in the client-side directory, put a `check` script that returns 1 if it's not run interactively (or if a specific environment variable is not set, or something), so that this backup job is not triggered during the scheduled runs but can be triggered manually.
+ * Optional: set up a separate sources.d-style directory and an accompanying server-side rsync module for `/lxc/guest1/rootfs/home` (and any other filesystems you want to be able to back up separately); in the client-side directory, put a `check` script that returns 1 if it's not run interactively (or if a specific environment variable is not set, or something), so that this backup job is not triggered during the scheduled runs but can be triggered manually.
 
-*With* sub-sources, it's not much simpler, but perhaps more intuitive:
+This approach has the virtue of relative simplicity. However, from a success or failure perspective it's all or nothing.
+
+*With* sub-sources, it's somewhat more complicated but allows better re-use of partial configurations (such as `exclude` files), as well as skipping traversal of sub-filesystems that haven't changed since the last backup:
 
  * Have a single `sources.d` directory on the client for the entire subtree.
    * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
    * *Do* set up separate write-only rsync modules for the lower elements of the hierarchy on the server; *don't* use `no-xdev` on the client (so that it backs up each fs separately).
    * Create a sub-source for each member fs in a hierarchy that matches the real fs hierarchy. (TODO: write a helper script for this.)
    * Symlink the `check-if-changed-since-snapshot` pre-client script into all your pertinent `sources.d` directories, including the sub-sources.
-   * TODO: implement a mechanism to force sub-sources to back up a specific snapshot (one just created recursively from the topmost dataset).
+   * The `create-and-mount-snapshot` pre-client script in the topmost source sets the path/ symlink in all sub-sources to directories where the corresponding snapshots are mounted.
  * Create separate filesystems on the server and arrange them in the same hierarchy they're in on the client (TODO: write a helper script for this).
  * Make sure the backupserver creates a recursive snapshot when the backup is finished (add `-r` to the `make-snapshot` command line in `post-xfer exec`).
  * Set up a separate sources.d-style directory and an accompanying server-side rsync module for `/lxc/guest1/rootfs/home` (and any other filesystems you want to be able to back up separately); in the client-side directory, put a check script that returns 1 if it's not run interactively (or if a specific environment variable is not set, or something), so that this backup job is not triggered during the scheduled runs but can be triggered manually.
+
+With this approach, you can individually track which sub-backup succeeded when, and disable recursion for filesystems that haven't changed since the last backup was taken. This can't be implemented in `check-if-changed-since-snapshot` even if it were sub-source aware, because it could only enable or disable recursion for the entire tree, not parts of it.
 
 On the server, we want to expose the snapshotted hierarchies as a single
 hierarchy over rsync. This can be done as follows:
@@ -681,13 +719,13 @@ only considering the property to be valid if it's not inherited), it would
 still be ugly.
 
 In addition to the syslog-style messages the client produces to this effect,
-you can create `log-file`s in the `sorces.d` directories to have rsync write
-a log of what files it uploads. The names of unchanged files are not logged.
-This logfile grows indefinitely unless you prune it somehow. (TODO: write a
-script that prunes the log so that only the last `n` occurrences of each
-file are kept, defaulting to 1. It shouldn't be hard: reverse the file using
-`tac`, pipe through script that builds hash with filenames as keys, counters
-as values etc.)
+you can create `log-file`s in the `sources.d` directories to have rsync
+write a log of what files it uploads. The names of unchanged files are not
+logged. This logfile grows indefinitely unless you prune it somehow. (TODO:
+write a script that prunes the log so that only the last `n` occurrences of
+each file are kept, defaulting to 1. It shouldn't be hard: reverse the file
+using `tac`, pipe through script that builds hash with filenames as keys,
+counters as values etc.)
 
 The default `log-file-format` allows you to keep track of which file was
 uploaded when, and what its properties were at the time. It could be used in
