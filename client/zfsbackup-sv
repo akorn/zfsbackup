@@ -33,10 +33,23 @@
 # TODO: instead of retrying in a random order, retry in a LIFO order (retry
 # sources first that have gone the longest time without being retried).
 
-exec 2>&1
-SVDIR=$(pwd)
-SVNAME="${SVDIR:t}"
-CONFIG=/etc/default/"$SVNAME"
+if [[ -d supervise/. ]] && [[ $$ = $(<supervise/pid) ]]; then	# are we being run from runit? (This is not technically correct; we might just *happen* to have started in a directory whose `supervise` subdir contains a file called 'pid' that contains our PID.)
+	exec 2>&1
+	SVDIR=$(pwd)
+	SVNAME="${SVDIR:t}"
+	CONFIG=/etc/default/"$SVNAME"		# this is sourced late, so it can override /etc/zfsbackup/client.conf too
+	SUFFIX=${SVNAME#zfsbackup-}
+	if [[ $SUFFIX = $SVNAME ]]; then	# If the suffix is meaningful, we can use it to set defaults for BACKUPSERVER and SOURCES. The suffix is meaningful IFF the name of the runit service began with "zfsbackup-", which the line above stripped.
+		unset SUFFIX			# if not, we unset SUFFIX
+	elif [[ -d /etc/zfsbackup/sources.d/$SUFFIX ]]; then	# If the suffix is a plausible name for a backupserver, set appropriate defaults here to reduce the need for explicit configuration.
+		BACKUPSERVER=$SUFFIX
+		export SOURCES=/etc/zfsbackup/sources.d/$BACKUPSERVER
+		ZFSBACKUP_CLIENT_ARGS=(--server $BACKUPSERVER)
+	fi
+	export USE_SYSLOG=0
+else
+	export USE_SYSLOG=1
+fi
 
 SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# seconds
 ONBOOT_SLEEP=12h
@@ -54,9 +67,8 @@ LOADWATCH_LOW=10	# what system load level to resume suspended
 CHRT=(chrt -i 0
 nice -n 19)		# used as a command prefix; the default runs the backup
 			# with the SCHED_IDLE scheduler at nice 19, reducing its priority.
-SOURCES=/etc/zfsbackup/sources.d
+export SOURCES=${SOURCES:-/etc/zfsbackup/sources.d}
 
-USE_SYSLOG=0
 DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 . $DEFAULT_FUNCTIONS
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
@@ -69,10 +81,6 @@ zmodload zsh/datetime
 
 [[ -r "$CONFIG" ]] && . "$CONFIG"
 
-if ((verbose)); then	# the old behaviour was to print informational messages if VERBOSE=1; translate that to a log level of at least info now (only debug would be higher)
-	[[ $LOG_LEVEL = debug ]] || LOG_LEVEL=info
-fi
-	
 function error_exit() { # doesn't return
 	case "$EXIT_ACTION" in
 		stop-service)	exec sv d "$SVDIR" ;;
