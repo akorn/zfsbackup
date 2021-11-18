@@ -5,8 +5,7 @@
 # successful backup.
 
 DESTROYLOCK=/var/lock/korn.zfsbackup.zfs.destroy.lock
-LOCKTIMEOUT=600
-PROPPREFIX=korn.zfsbackup
+LOCKTIMEOUT=3600
 
 LOG_LEVEL=warning
 USE_SYSLOG=1
@@ -24,9 +23,12 @@ zmodload zsh/datetime
 
 [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
 
-# exit silently if the snapshot doesn't exist; it was either removed
+# Exit silently if the snapshot doesn't exist; it was either removed
 # manually or by a cronjob, and there is nothing useful for this script to
 # do. Printing an error message would just result in mail being sent.
+#
+# If we run into errors later, we'll check again if it's because the
+# snapshot got removed in the meantime.
 zfs get -Hp -o value name "$1" 2>/dev/null >/dev/null || exit 0
 
 # Obtain an exclusive lock to avoid race conditions arising from several concurrent instances of this script
@@ -38,9 +40,17 @@ if ! zsystem flock -f lockfd -t $LOCKTIMEOUT $DESTROYLOCK; then
 	die "unable to obtain lock on $DESTROYLOCK; not destroying $1."
 fi
 
-expires=$(zfs get -Hp -o value ${PROPPREFIX}:expires "$1") || {
-	echo "FATAL: couldn't read ${PROPPREFIX}:expires property of \"$1\"" >&2
-	exit 1
+expires=$(zfs get -Hp -o value ${PROPPREFIX}:expires "$1" 2>/dev/null) || {
+	# Again, exit silently if the snapshot doesn't exist; since it
+	# existed before but doesn't exist now, obviously somebody or
+	# something removed it while we were waiting for the lock.  Since we
+	# would possibly have removed it anyway, it no longer being around
+	# is not a reason to print an error message.
+	zfs get -Hp -o value name "$1" 2>/dev/null >/dev/null || exit 0
+
+	# Otherwise, if the snapshot is still there but zfs get still
+	# returned an error, the admin should know.
+	die "FATAL: couldn't read ${PROPPREFIX}:expires property of \"$1\""
 }
 
 if [[ $EPOCHSECONDS -lt "$expires" ]]; then # Hasn't expired yet
@@ -65,9 +75,18 @@ zfs list -H -d 1 -t snapshot -S creation -o ${PROPPREFIX}:successful,name $origi
 }
 
 # TODO: don't expire snapshots of unsuccessful backups if there are no successful ones?
-log info "destroying expired snapshot $1"
-if ! zfs destroy -d "$1"; then
-	die "failed to destroy snapshot $1"
-else
-	exit 0
-fi
+log info "destroying expired snapshot $1 (expired at $(strftime %F\ %H:%M:%S $expires))"
+destroyerror=$(zfs destroy -d "$1" 2>&1) || {
+	# Again, exit silently if the snapshot doesn't exist; since it
+	# existed before but doesn't exist now, obviously somebody or
+	# something removed it while we were waiting for the lock.  Since we
+	# would just have removed it anyway, it no longer being around
+	# is not a reason to print an error message.
+	zfs get -Hp -o value name "$1" 2>/dev/null >/dev/null || exit 0
+
+	# If the snapshot is still there, though, but we failed to destroy
+	# it, do print an error:
+	die "failed to destroy snapshot $1 (expired at $(strftime %F\ %H:%M:%S $expires)): $destroyerror"
+}
+
+exit 0
