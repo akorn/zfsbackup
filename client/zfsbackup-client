@@ -2,10 +2,10 @@
 #
 # usage: zfsbackup-client [ --server server1[,server2[,...]] ] [ source1 [ source2 [ ... ] ] ]
 
-SOURCES=/etc/zfsbackup/sources.d
+export SOURCES=${SOURCES:-/etc/zfsbackup/sources.d}
 DEFAULT_LOGFORMAT="%B %U:%G %M %l %o %i %C	%f%L"
-LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
-USE_SYSLOG=1
+export LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
+export USE_SYSLOG=${USE_SYSLOG:-1}
 DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 
 # An array we'll put the names of the servers we're asked to back up to in.
@@ -57,7 +57,7 @@ function update_metadata() { # fetches source related metadata from current dire
 	fi
 }
 
-function process_source() { # handles backup of a single sources.d directory; calls itself for subjobs, if any
+function process_source() { # handles backup of a single sources.d directory; calls itself for subjobs, if any. Warning: changes working directory.
 	local zbSOURCENAME="$1"
 	local me="zfsbackup: $zbSOURCENAME"
 	# we have to source the config here so that $BACKUPSERVER
@@ -65,7 +65,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 
 	export zbSOURCENAME # make this available to pre-client and post-client scripts
-	local -a rsync_options
+	local -a rsync_options=()
 	local USER
 	local preclient_exit preclientd_exit postclient_exit postclientd_exit
 	local rsync_exit ss_exit subsource_exit		# could use a hash to record the exit status of each sub-source spearately; would this be useful/necessary?
@@ -98,15 +98,22 @@ function process_source() { # handles backup of a single sources.d directory; ca
 	[[ -e no-xattrs ]] || rsync_options=($rsync_options -X)
 	# determine whether to set -x (to avoid traversing mountpoints). Logic:
 	# * if no-xdev is set explicitly, we don't add -x
-	# * if recurisve-snapshot exists, but subsources.d doesn't, we don't add -x
+	# * if recursive-snapshot exists, but subsources.d doesn't, we don't add -x
 	# * if recursive-snapshot exists, and so does subsources.d, we add -x, because we assume the subsources will cause sub-filesystems to be backed up
 	# * if subsources.d exists without recursive-snapshot, we add -x because adding -x has been the default
+	# * if neither recursive-snapshot, nor subsources.d exists, we add -x because it has been the default
 	# * if xdev exists, we add -x
-	if ! [[ -e no-xdev ]]; then
-		if [[ -e xdev ]]; then
-			rsync_options=($rsync_options -x)
+	if ! [[ -e no-xdev ]]; then						# * if no-xdev is set explicitly, we don't add -x (but note that `options` can still add it
+		if [[ -e recursive-snapshot ]] && ! [[ -d subsources.d/. ]]; then
+			: 							# * if recursive-snapshot exists, but subsources.d doesn't, we don't add -x
 		elif [[ -e recursive-snapshot ]] && [[ -d subsources.d/. ]]; then
-			rsync_options=($rsync_options -x)
+			rsync_options=($rsync_options -x)			# * if recursive-snapshot exists, and so does subsources.d, we add -x, because we assume the subsources will cause sub-filesystems to be backed up
+		elif [[ -d subsources.d/. ]] && ! [[ -e recursive-snapshot ]]; then
+			rsync_options=($rsync_options -x)			# * if subsources.d exists without recursive-snapshot, we add -x because adding -x has been the default
+		elif ! [[ -e recursive-snapshot ]] && ! [[ -d subsources.d/. ]]; then
+			 rsync_options=($rsync_options -x)			# * if neither recursive-snapshot, nor subsources.d exists, we add -x because it has been the default
+		elif [[ -e xdev ]]; then
+			rsync_options=($rsync_options -x)			# * if xdev exists, we add -x
 		fi
 	fi
 	[[ -r options ]] && rsync_options=($rsync_options "${(f)mapfile[options]}")
@@ -169,7 +176,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 			if [[ -d "$zbSOURCENAME/subsources.d" ]]; then
 				subsource_exit=0
 				for subsource in "$zbSOURCENAME/subsources.d/"*(/N); do
-					process_source "${subsource:A}"
+					( process_source "${subsource:A}" )	# Subshell so subsources don't overwrite our environment variables and don't change our working directory. ":A" turns the path into an absolute one.
 					ss_exit=$?
 					if ((ss_exit)); then
 						echo "$0: WARNING: subsource ${subsource:A} exited with nonzero return code $ss_exit." >&2
@@ -198,6 +205,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 						rsync_options=($rsync_options --recursive)	# the no-recursive flag file can be created and removed dynamically by pre-client scripts; the point of performing a non-recursive backup of "." is to force a server-side snapshot to be created without traversing the (presumably unchanged) local fs
 						export RSYNC_OPTIONS="${(F)rsync_options[@]}"	# re-export because the options just changed
 					fi
+					log debug "Invoking $timelimit rsync --links --perms --times --group --owner --devices --specials $rsync_options[@] . '$url'"
 					$timelimit rsync --links --perms --times --group --owner --devices --specials $rsync_options[@] . "$url"
 					rsync_exit="$?"
 					echo $rsync_exit >"$zbSOURCENAME/rsync-exit-status"
@@ -208,6 +216,20 @@ function process_source() { # handles backup of a single sources.d directory; ca
 							echo "$snapshot_name" >$zbSOURCENAME/last-successfully-backed-up-snapshot-name
 							echo "$snapshot_created" >$zbSOURCENAME/last-successfully-backed-up-snapshot-creation
 							touch --date @$snapshot_created $zbSOURCENAME/last-successfully-backed-up-snapshot-creation
+# Something like this would be tempting, but see problems below:
+#
+#							if [[ -r zfs-dataset ]]; then
+#								zbZFSDATASET=$(<zfs-dataset)
+#								zfs set $PROPPREFIX:last-successfully-backed-up-snapshot-name:$zbZFSDATASET=$snapshot_name $zbZFSDATASET
+#								zfs set $PROPPREFIX:last-successfully-backed-up-snapshot-creation:$zbZFSDATASET=$snapshot_created $zbZFSDATASET
+#							fi
+# Problems:
+#
+# 1. Including the name of the origin filesystem only works as intended until the filesystem is renamed.
+# 2. Not including the name of the origin filesystem means that users of the property must make sure it is not inherited, otherwise they get wrong information, with potentially data threatening consquences.
+# 3. The name of the property would have to include the name of the backupserver as well, which would make the name of this attribute even more unwieldy. If it were only used programmatically that would be fine, but it also clutters up interactive "zfs get" output.
+#
+# Idea: perhaps it would be better to use xattrs on the root of the filesystem? Those are not inherited by child filesystems, but they're in band.
 						fi
 					else
 						# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
