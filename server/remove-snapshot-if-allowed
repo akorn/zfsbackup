@@ -8,7 +8,6 @@ DESTROYLOCK=/var/lock/korn.zfsbackup.zfs.destroy.lock
 LOCKTIMEOUT=3600
 
 LOG_LEVEL=warning
-USE_SYSLOG=1
 DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 
 . $DEFAULT_FUNCTIONS
