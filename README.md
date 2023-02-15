@@ -151,8 +151,9 @@ Additionally, the client-side `zfsbackup` scripts can create the following files
  * `pre-client.d-exit-status` -- the exit status of `run-parts --report ./pre-client.d` when it was last run.
  * `rsync-exit-status` -- the exit status of the rsync process itself, from when it last completed (if rsync is currently running, the file may exist but will contain the exit status of the previous instance).
  * `stamp-failure` -- created and its timestamp updated whenever a backup is attempted but fails. Removed when a backup succeeds. Can be used to find datasets that weren't backed up successfully. Contains a brief message that indicates why the client thinks the backup failed.
- * `stamp-success` -- created and its timestamp updated whenever a backup completes successfully. Can be used to check when the last apparently successful backup has taken place.
+ * `stamp-success` -- created and its timestamp updated whenever a backup completes successfully. Can be used to check when the last apparently successful backup has taken place. If we backed up a snapshot, this will be the time the snapshot was created; if not, it will be the time the successful backup run *started*.
  * `zfsbackup-client-exit-status` -- the exit status of the entire `zfsbackup-client` subshell that processed this data source. Currently, this is the sum of the exit statuses of `rsync` and all post-client processes.
+ * `zfs_instances_included_in_recursive_snapshot` -- created by `create-and-mount-snapshot` and used by `check-if-changed-since-snapshot`; contains the list of zfs filesystems that were included in the backup of a snapshot based recursive backup of a zfs subtree. This isn't necessarily the entire subtree because you may have excluded some with `no-snapshot`; others may have mountpoints outside the subtree; and zvols are excluded from recursive snapshots as well. Also, new filesystems may have been created since the backup was run.
 
 You may place other files in `sources.d` directories (needed by custom pre- or
 post-client scripts, for example); they will be ignored by all scripts that
@@ -460,7 +461,6 @@ Without sub-sources you could go about it this way:
  * Have a single `sources.d` directory on the client for the entire subtree.
    * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
    * Don't set up separate write-only rsync modules for the lower elements of the hierarchy on the server; use `no-xdev` on the client to traverse the entire subtree.
-   * If you want to use the `check-if-changed-since-snapshot` pre-client script, you have to modify it to also be recurisve (patches welcome!).
  * Create separate filesystems on the backup server and arrange them in the same hierarchy they're in on the client (TODO: write a helper script for this.)
  * Make sure the backupserver creates a recursive snapshot when the backup of the topmost directory is finished (add `-r` to the `make-snapshot` command line in `post-xfer exec`).
  * Optional: set up a separate sources.d-style directory and an accompanying server-side rsync module for `/lxc/guest1/rootfs/home` (and any other filesystems you want to be able to back up separately); in the client-side directory, put a `check` script that returns 1 if it's not run interactively (or if a specific environment variable is not set, or something), so that this backup job is not triggered during the scheduled runs but can be triggered manually.
@@ -531,6 +531,77 @@ zfs set korn.zfsbackup:last-audit="$(date)" poolname
 Then, using `zfs list -s creation -o name,creation` you can check whether
 there are any filesystems that were created after the last audit (which
 may thus not have backups configured).
+
+### Client-side pre-client.d and post-client.d scripts
+
+The package provides a number of such scripts, some of which have been
+briefly introduced above.
+
+#### check-if-changed-since-snapshot (pre-client.d)
+
+This is a zfsbackup client-side pre-client script. It always exits successfully.
+
+It creates `no-recursive` if the filesystem named in ./zfs-dataset
+definitely hasn't changed since it was last backed up (and thus doesn't need
+to be backed up now).
+
+Creating `no-recursive` causes zfsbackup-client to just rsync `.` itself,
+but still triggers a server-side snapshot (so that
+yearly/monthly/weekly/etc. Snapshots will still exist there even if no full
+backup is performed).
+
+If the snapshot the last successful backup is based on still exists, the
+script checks the `written@snapname` property; if that's zero, the fs hasn't
+changed.
+
+If that snapshot no longer exists, it finds the latest snapshot that
+predates the backup and checks the `written@snapname` property on that one
+-- if it's still 0, the fs hasn't changed since that time, so it can't have
+changed since the last backup either.
+
+If it can't rule out that the filesystem changed since the last backup (or
+can prove that it has changed), it removes `no-recursive`.
+
+It supports recursive snapshots in cooperation with
+`create-and-mount-snapshot`.
+
+Note that if you make organizational changes to the backed-up zfs tree (such
+as moving the mountpoints of possibly relevant child filesystems out of the
+tree, or back into it) it is best to create a new backup with recursion
+enabled, because while `check-if-changed-since-snapshot` will detect many
+such changes it doesn't attempt to detect all. Simply disable the script and
+remove `no-recursive` for a single run.
+
+#### create-and-mount-snapshot (pre-client.d)
+
+Documented in the script itself, for now (the script begins with 100+ lines
+of explanatory comments).
+
+#### pre-bindmount (pre-client.d)
+
+Creates a bind mount of the filesystem to be backed up, so that files and
+directories possibly hidden by sub-mounts become visible to the backup.
+
+Only use if you can't use snapshots.
+
+#### post-bindmount (post-client.d)
+
+Undoes the bind mount created by `pre-bindmount`. Always enable it in
+`post-client.d` if `pre-client.d` has `pre-bindmount`.
+
+#### set-path-to-latest-zfs-snapshot (pre-client.d)
+
+If you, for whatever reason, don't want zfsbackup to create and manage its
+own zfs snapshots, this script can make use of existing snapshots, by
+finding the latest one of the filesystem to be backed up, mounting it, then
+setting the `path/` symlink to point to the mountpoint of the snapshot.
+
+Use `create-and-mount-snapshot` instead whenever you can.
+
+#### umount-and-destroy-snapshot (post-client.d)
+
+The companion script to `create-and-mount-snapshot` (in fact it's the same
+script that changes behaviour based on the name it is called with).
 
 ### Scheduling backups
 
