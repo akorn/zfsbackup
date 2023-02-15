@@ -47,8 +47,10 @@ if [[ -d supervise/. ]] && [[ $$ = $(<supervise/pid) ]]; then	# are we being run
 		ZFSBACKUP_CLIENT_ARGS=(--server $BACKUPSERVER)
 	fi
 	export USE_SYSLOG=0
+	export USE_STDERR=1
 else
 	export USE_SYSLOG=1
+	export USE_STDERR=0
 fi
 
 SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# seconds
