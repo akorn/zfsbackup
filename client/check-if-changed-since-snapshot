@@ -12,7 +12,6 @@
 #
 # If we can't rule out that the filesystem changed since the last backup, we remove "no-recursive".
 #
-# TODO: support backups that use recursive snapshots (check for changes recursively)
 # TODO: optionally(?), use zfs diff to create a "files-from" file for rsync?
 
 USE_SYSLOG=1
@@ -34,37 +33,86 @@ function do_recursion() {
 	exit 0
 }
 
-[[ -f no-xdev ]] && do_recursion # there are sub-filesystems and we have no idea whether they changed; enable recursion
 [[ -f stamp-success ]] || do_recursion	# no successful backup yet, so yes, proceed
 [[ -f last-successfully-backed-up-snapshot-name ]] || do_recursion	# no data on last backed up snapshot, proceed
+snapshot_name=$(<last-successfully-backed-up-snapshot-name)
+myfs="${snapshot_name%@*}"
+snappostfix="${snapshot_name#*@}"
 
 zmodload zsh/stat
 zmodload zsh/datetime
 
 me=$0	# used by log()
-myfs="${1:-$(head -n 1 zfs-dataset)}"
-last_success=$(zstat +mtime stamp-success)
-snapshot_name=$(<last-successfully-backed-up-snapshot-name)
-written=$(zfs get -Hp -o value written@$snapshot_name $myfs 2>/dev/null)
-if [[ $written = 0 ]]; then	# the 'zfs get' command returns "-" for non-existent snapshots
-	log info "Disabling recursion for backup. Last successfully backed up snapshot $snapshot_name still exists; filesystem not modified since snapshot creation."
-	no_recursion
-elif [[ $written = - ]]; then	# The snapshot no longer exists.
-	# We need to find all snapshots in decreasing order of creation time; skip the ones that are younger than the last successful backup; and check the youngest that predates the backup.
-	zfs list -d 1 -t snapshot -S creation -Hp -o name,creation $myfs 2>/dev/null | while read snapshot_name snapshot_created; do
-		[[ $snapshot_created -ge $last_success ]] && continue	# greater or equal; if equal, snapshot could have been taken just after successful backup, and could conceivably contain new writes
-		written=$(zfs get -Hp -o value written@$snapshot_name $myfs)
-		if [[ $written = 0 ]]; then
-			log info "Disabling recursion for backup. Filesystem not modified since creation of $snapshot_name at $(strftime '%F %H:%M:%S' $snapshot_created), which predates date of last successful backup ($(strftime '%F %H:%M:%S' $last_success))."
-			no_recursion	# no_recursion exits when done
-		else
-			log info "Enabling recursion. Last successfully backed up snapshot $(<last-successfully-backed-up-snapshot-name) no longer exists. Latest snapshot that predates last successful backup ($(strftime '%F %H:%M:%S' $last_success)) appears to be $snapshot_name (created at $(strftime '%F %H:%M:%S' $snapshot_created)), and at least $written bytes have changed in the filesystem since its creation."
-			do_recursion
-			# not reached
-		fi
-	done
-	log info "Enabling recursion. Last successfully backed up snapshot $(<last-successfully-backed-up-snapshot-name) no longer exists, and I couldn't find a snapshot that predates last successful backup ($(strftime '%F %H:%M:%S' $last_success)), thus I couldn't prove that the filesystem hasn't changed since last successful backup."
+if [[ -f last-successfully-backed-up-snapshot-creation ]]; then
+	last_success=$(<last-successfully-backed-up-snapshot-creation)	# this is the time the contents of the backup reflects
 else
-	log info "Enabling recursion. Filesystem definitely changed since last successful backup ($(strftime '%F %H:%M:%S' $last_success)); at least $written bytes written."
+	last_success=$(zfs get -Hp -o value creation $snapshot_name 2>/dev/null)
 fi
-do_recursion	# there was no snapshot that predates the last backup, so we can't say for certain whether the fs changed; the safe bet is to force recursion
+if ! [[ $last_success -gt 0 ]]; then
+	last_success=$(zstat +mtime stamp-success)
+	log warning "neither last-successfully-backed-up-snapshot-creation nor the last backed up snapshot still exist. I'm using the mtime of stamp-success as the timestamp of the backup, but unless zfsbackup-client set it correctly, this can be later than when the snapshot that was backed up was created. It's thus possible that our heuristics will miss changes made between the time the backed-up snapshot was actually created and the timestamp of stamp-success, if a snapshot was created between these two times and still exists. Since this should be a rare corner case, we just warn about it but continue."
+fi
+
+typeset -U relevant_fs	# a set we will collect a list of child filesystems in
+typeset -U nosnapshot	# a list of filesystems that are not be included in the recursive snapshot
+[[ -r no-snapshot ]] && nosnapshot=($(<no-snapshot))	
+
+if [[ -f no-xdev ]]; then
+	# It would be tempting to pretend no-xdev wasn't there if there are no child filesystems; however, there may have existed child filesystems at the time the last backup was taken, but deleted in the meantime. If we're backing up an entire zfs subtree to a single fs on the backup server, the backups of deleted client-side child filesystems must be deleted on the server as well, so recursion must still be enabled.
+	if ! [[ -s zfs_instances_included_in_recursive_snapshot ]]; then
+		log info "zfs_instances_included_in_recursive_snapshot doesn't exist, but no-xdev does. Apparently $(pwd) backs up a (potentially partial) zfs subtree but the list of filesystems the last backup included hasn't been recorded. Enabling recursion to be on the safe side."
+		do_recursion
+	elif [[ -f no-snapshot ]] && ! [[ no-snapshot -ot stamp-success ]]; then
+		log info "no-snapshot is newer than stamp-success, which means the list of filesystems to be excluded from this recursively-snapshotted backup may have changed since the last backup. Enabling recursion to be on the safe side."
+		do_recursion
+	else
+		zfs list -Hp -o name,creation -r -t filesystem $myfs | while read fsname creation; do	# we must also check whether there are any new child filesystems that were created after the last backup, so try to see if there are any
+			if [[ $creation -ge $last_success ]]; then
+				# If it were in no-snapshot, we could ignore it, but if no-snapshot is newer than stamp-success we already gave up earlier to avoid overcomplicating the logic of this script.
+				log info "$fsname, a child of $myfs, was created after the last backup. Since it may need to be included in the backup, we're enabling recursion."
+				do_recursion
+			fi
+		done
+	fi
+	relevant_fs=($(<zfs_instances_included_in_recursive_snapshot))
+else
+	relevant_fs=($myfs)
+fi
+
+for fs in $relevant_fs[@]; do
+	if ! [[ "$(zfs get -Hp -o value name $fs 2>/dev/null)" = "$fs" ]]; then
+		log info "$fs apparently no longer exists, but was included in the last backup. Enabling recursion."
+		do_recursion
+		# not reached
+	fi
+	need_recursion=1	# we'll set this to zero if we can
+	written=$(zfs get -Hp -o value written@$fs@$snappostfix $fs 2>/dev/null)
+	if [[ $written = 0 ]]; then	# the 'zfs get' command returns "-" or "" for non-existent snapshots
+		log info "Last successfully backed up snapshot $fs@$snappostfix still exists; filesystem $fs not modified since snapshot creation."
+		need_recursion=0
+	elif [[ $written = - ]] || ! [[ "$written" -gt 0 ]] ; then	# The snapshot no longer exists, or there was some error and "zfs get" returned an empty string or something bogus that is not a number
+		log debug "Last successfully backed up snapshot $fs@$snappostfix apparently no longer exists; enumerating all snapshots of $fs to hopefully prove it hasn't been written to since the backup."
+		# We need to find all snapshots in decreasing order of creation time; skip the ones that are younger than the last successful backup; and check the youngest that predates the backup.
+		zfs list -d 1 -t snapshot -S creation -Hp -o name,creation $fs 2>/dev/null | while read snapshot_name snapshot_created; do
+			[[ $snapshot_created -ge $last_success ]] && continue	# greater or equal; if equal, snapshot could have been taken just after successful backup, so even if it wasn't written to it doesn't prove the fs hasn't changed since the backup. We only want to check the first one that's older than the backup, so skip ahead until we find it.
+			written=$(zfs get -Hp -o value written@$snapshot_name $fs)
+			if [[ $written = 0 ]]; then
+				log info "Filesystem not modified since creation of $snapshot_name at $(strftime '%F %H:%M:%S' $snapshot_created), which predates date of last successful backup ($(strftime '%F %H:%M:%S' $last_success))."
+				need_recursion=0
+				break	# we don't care about subsequent (even earlier) snapshots if we found at least one with written=0 that predates the backup
+			else
+				log info "Enabling recursion. Last successfully backed up snapshot $fs@$snappostfix no longer exists. Latest snapshot that predates last successful backup ($(strftime '%F %H:%M:%S' $last_success)) appears to be $snapshot_name (created at $(strftime '%F %H:%M:%S' $snapshot_created)), and at least $written bytes have changed in the filesystem since its creation."
+				do_recursion
+			fi
+		done
+		if ((need_recursion)); then
+			log info "Enabling recursion. Last successfully backed up snapshot $fs@$snappostfix no longer exists, and I couldn't find a snapshot that predates last successful backup ($(strftime '%F %H:%M:%S' $last_success)), thus I couldn't prove that the $fs hasn't changed since last successful backup."
+			do_recursion
+		fi
+	else
+		log info "Enabling recursion. Filesystem $fs definitely changed since the last successful backup ($(strftime '%F %H:%M:%S' $last_success)); at least $written bytes written."
+		do_recursion
+	fi
+done
+log notice "Disabling recursion. I checked the following filesystems and neither has been written to since the last successful backup ($(strftime '%F %H:%M:%S' $last_success)): $relevant_fs."
+no_recursion
