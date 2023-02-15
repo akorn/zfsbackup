@@ -210,7 +210,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 					rsync_exit="$?"
 					echo $rsync_exit >"$zbSOURCENAME/rsync-exit-status"
 					if [[ "$rsync_exit" = 0 ]]; then
-						touch "$zbSOURCENAME/stamp-success"
+						touch --date @${snapshot_created:-$starttime} "$zbSOURCENAME/stamp-success"	# if we backed up a snapshot, set the mtime of stamp-success to the creation time of the snapshot, as that reflects the time the backup was taken most accurately. Otherwise use starttime, because we don't want to give the impression that any specific changes made after the backup started would be part of the backup.
 						rm -f "$zbSOURCENAME/stamp-failure" 2>/dev/null
 						if [[ -n "$snapshot_name" ]]; then
 							echo "$snapshot_name" >$zbSOURCENAME/last-successfully-backed-up-snapshot-name
@@ -229,7 +229,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 # 2. Not including the name of the origin filesystem means that users of the property must make sure it is not inherited, otherwise they get wrong information, with potentially data threatening consquences.
 # 3. The name of the property would have to include the name of the backupserver as well, which would make the name of this attribute even more unwieldy. If it were only used programmatically that would be fine, but it also clutters up interactive "zfs get" output.
 #
-# Idea: perhaps it would be better to use xattrs on the root of the filesystem? Those are not inherited by child filesystems, but they're in band.
+# Idea: perhaps it would be better to use xattrs on the root of the filesystem? Those are not inherited by child filesystems, but they're in band. Also, we could set properties on the snapshots; that would be less invasive.
 						fi
 					else
 						# we don't remove stamp-success because it can be used to keep track of when the last successful backup took place
