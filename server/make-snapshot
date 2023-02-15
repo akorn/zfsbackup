@@ -11,6 +11,9 @@ NAMEPREFIX_DEFAULT=extra # will be part of snapshot name
 MINSIZE=0
 MININODES=7
 IMAGE_DEFAULT="zfsbackup-NAMEPREFIX-%Y-%m-%d-%H%M"
+SYNC_LOCK=/run/lock/zfsbackup.make-snapshot.sync.lock
+MAX_PARALLEL_SNAPSHOTS=4	# how many zfs snapshot operations should we allow to run in parallel? You can try tuning this if you find that too many snapshot requests piling up causes slowdowns. It's not guaranteed that reducing or increasing parallelism helps, but it might. If set to less than 1, there is no limit.
+SNAPSHOT_LOCK=/run/lock/zfsbackup.make-snapshot.snapshot.lock	# will get a numeric suffix for each slot specified by MAX_PARALLEL_SNAPSHOTS
 
 USE_SYSLOG=1
 DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
@@ -18,7 +21,6 @@ DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 . $DEFAULT_FUNCTIONS
 [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
 [[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
-[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
 
 me="${0:t}[rsync$RSYNC_PID]"
 
@@ -120,8 +122,11 @@ function is_first_daily() {
 	return 0
 }
 
+[[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
+
 # Get current date and time; we're not currently using every variable
 zmodload zsh/datetime
+zmodload zsh/system
 starttime=$EPOCHSECONDS
 strftime      "%Y-%m-%d %Y   %m    %d  %G          %V   %j        %u        %H   %M" $starttime \
 	| read fulldate year month day isoweekyear week dayofyear dayofweek hour minute
@@ -145,17 +150,46 @@ minsize=$(zfs get -Hp -o value ${PROPPREFIX}:minsize "$origin")
 [[ "$minsize" = "-" ]] && minsize=$MINSIZE
 mininodes=$(zfs get -Hp -o value ${PROPPREFIX}:mininodes "$origin")
 [[ "$mininodes" = "-" ]] && mininodes=$MININODES
-#sync # needed to make sure the lrefer value we're obtaining is final (?)
-#sleep 30 # instead of syncing, which is too hard on other processes -- a sync of this fs is bound to happen within 30s, right? right?
-sync -f $RSYNC_MODULE_PATH/.	# this translates to a syncfs() call, which should sync just this fs
-actualsize="$(zfs get -Hp -o value lrefer "$origin")"
-df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
-if [[ "$minsize" -gt 0 ]]; then
-	if [[ "$actualsize" -lt "$minsize" ]]; then
+
+# Originally, this script tried to use sync -f to unconditionally sync the fs pointed to by RSYNC_MODULE_PATH.
+# Unfortunately, if many such syncs pile up they can take an hour or more to finish.
+# So this optimization was born:
+# 1. if we pass the minsize heuristics check without syncing, skip the sync entirely.
+# 2. if we don't, try to obtain a lock on SYNC_LOCK. If we can, run sync while holding the lock.
+# 3. if we can't, some other thread is already running the sync. We wait for it to finish, then check the minsize heuristic again.
+# 4. if we still fail it, it might be possible the previous sync got called too early and didn't sync our changes (dubious, but maybe), so we keep trying until either another sync finishes or a sync(8) we call ourselves finishes.
+tried_sync=0
+sync_attempts=0
+while ! ((tried_sync)) && ((sync_attempts < 2)); do
+	actualsize="$(zfs get -Hp -o value lrefer "$origin")"
+	df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
+	if [[ "$minsize" -gt 0 ]]; then
+		if [[ "$actualsize" -lt "$minsize" ]] && ! ((tried_sync)); then
+			# maybe we just need to sync for the lrefer value to settle; since sync is expensive, we don't do it unless it seems necessary
+			: >>$SYNC_LOCK
+			log debug "Actual size of $RSYNC_MODULE_PATH appears to be $actualsize, less than $minsize. Trying to sync() to force zfs to update metadata."
+			if zsystem flock -f lockfd -t 0 $SYNC_LOCK 2>/dev/null; then		# if we can't obtain this lock, another thread is already calling sync(); we'll just wait for it to finish.
+				tried_sync=1
+				sync
+				zsystem flock -u lockfd
+			else
+				zsystem flock -f lockfd $SYNC_LOCK	# wait for the lock; if we get it, it means the sync(8) invoked by the other process finished
+				zsystem flock -u $lockfd		# we can release it immediately; we just had to wait for the other sync(8)
+				((sync_attempts++))			# we'll try this at most twice
+			fi
+		else
+			log debug "Actual size of $RSYNC_MODULE_PATH is $actualsize, at least $minsize. Skipping unnecessary sync(8)."
+			break
+		fi
+	else
+		break
+	fi
+	if ((tried_sync)) || ((sync_attempts >= 2)); then
 		log warning "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize. Setting partial=1."
 		partial=1
 	fi
-fi
+done
+
 if [[ "$mininodes" -gt 7 ]]; then
 	if [[ "$actualinodes" -lt "$mininodes" ]]; then
 		log warning "Actual inodes of $RSYNC_MODULE_PATH is $actualinodes, less than $mininodes. Setting partial=1."
@@ -183,19 +217,40 @@ properties=($properties -o ${PROPPREFIX}:expires="$expires")
 properties=($properties -o ${PROPPREFIX}:expires-readable="$expires_readable")
 
 log notice "transfer from $RSYNC_USER_NAME@${RSYNC_HOST_NAME}[$RSYNC_HOST_ADDR] to [$RSYNC_MODULE_NAME] ($RSYNC_MODULE_PATH) finished (exit status $RSYNC_EXIT_STATUS)."
-log info "Running zfs snapshot $@ $properties[@] $snapname"
-zfs snapshot $@ $properties[@] "$snapname" >&2
+# Let's try to reduce i/o load and/or kernel lock contention by doing a limited number of snapshots at a time.
+
+if ((MAX_PARALLEL_SNAPSHOTS < 1)); then	# no limit configured
+	log info "Running zfs snapshot $@ $properties[@] $snapname"
+	zfs snapshot $@ $properties[@] "$snapname" >&2
+else
+	SNAPSHOT_LOCK=${SNAPSHOT_LOCK:-/run/lock/zfsbackup.make-snapshot.snapshot.lock}	# give it a sensible value in case the configuration zeroed it out
+
+	for i in {1..$MAX_PARALLEL_SNAPSHOTS}; do : >>$SNAPSHOT_LOCK.$i; done		# Create the lockfiles
+	snapshot_done=0
+	while ! ((snapshot_done)); do
+		for i in {1..$MAX_PARALLEL_SNAPSHOTS}; do
+			if zsystem flock -f lockfd -t 0 $SNAPSHOT_LOCK.$i 2>/dev/null; then
+					log info "Running zfs snapshot $@ $properties[@] $snapname (snapshot thread id: $i; max: $MAX_PARALLEL_SNAPSHOTS)"
+					zfs snapshot $@ $properties[@] "$snapname" >&2
+					zsystem flock -u $lockfd
+					snapshot_done=1
+					break
+			fi
+		done
+		if ! ((snapshot_done)); then
+			log debug "$MAX_PARALLEL_SNAPSHOTS snapshot operations already in progress. Delaying 'zfs snapshot $@ $properties[@] $snapname'."
+			sleep 1	# no locks available; wait and retry
+		fi
+	done
+fi
 
 if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
 	if ! [[ "$expires" = "never" ]]; then
-		if [[ -x /usr/bin/at ]]; then
-			cd /
-			echo "${(q)PATH_TO_REMOVESNAP}" \"$snapname\" \
-				| at -t $(strftime "%Y%m%d%H%M.%S" "$expires")
-		else
-# TODO: actually, at(1) may be anywhere in the PATH.
-			log err "can't schedule atjob without /usr/bin/at."
-		fi
+		cd /
+		echo "${(q)PATH_TO_REMOVESNAP}" \"$snapname\" \
+			| if ! at -t $(strftime "%Y%m%d%H%M.%S" "$expires") >&2; then
+				log err "Failed to schedule atjob. Maybe at isn't installed?"
+			fi
 	fi
 fi
 log notice "${0:t}[$RSYNC_PID]: backup job completed."
