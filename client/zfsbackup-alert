@@ -26,43 +26,46 @@ USE_SYSLOG=0			# when we use the log() function, we only want to write to stderr
 
 if ((ALERT_LAST_SUCCESSFUL_DAYS)); then
 	local -A backup_success
-	local date src
+	unset date src
+	local should_print=0
 	find $SOURCES/ -xdev -name "stamp-success" -mtime +$ALERT_LAST_SUCCESSFUL_DAYS -printf "%TF %h\n" | while read -r date src; do
 		backup_success[$src]=$date
+		should_print=1
 	done
 	find $SOURCES/ -xdev -type d | while read d; do
 		if [[ -e $d/url ]]; then
 			if ! [[ -e $d/stamp-success ]]; then
-				backup_success[$src]=never
+				backup_success[$d]=never
+				should_print=1
 			fi
 		fi
 	done
-	if [[ -n "$date" ]]; then
+	if ((should_print)); then
 		echo "Warning: the following backups have not succeeded in at least $ALERT_LAST_SUCCESSFUL_DAYS days:\n"
 		{
 			echo "config directory\tdate of last successful backup"
 			for i in ${(k)backup_success}; do
 				echo "$i\t"$backup_success[$i]
 			done
-		} | column -s "	"
+		} | column --table --table-noheadings --table-columns 'dirname,date' -s '	'
 		echo
 	fi
 fi
 
 if ((ALERT_FAILED)); then
 	local -A backup_fail
-	local date src
+	unset date src
 	find $SOURCES/ -name "stamp-failure" -printf "%TF %h\n" | while read -r date src; do
 		backup_fail[$src]=$date
 	done
-	if [[ -n "$date" ]]; then
+	if [[ -n "$backup_fail" ]]; then
 		echo "Warning: the last backup of the following filesystems failed:\n"
 		{
-			echo "config directory\tdate of failure"
+			echo 'config directory\tdate of failure\n'
 			for i in ${(k)backup_fail}; do
 				echo "$i\t"$backup_fail[$i]
 			done
-		} | column -s "	"
+		} | column --table --table-noheadings --table-columns 'dirname,date' -s '	'
 		echo
 	fi
 fi
