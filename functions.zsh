@@ -2,6 +2,12 @@
 
 export PROPPREFIX=${PROPPREFIX:-korn.zfsbackup}				# a hopefully sensible default that configfiles and the invocation environment can override
 LOG_LEVEL_NAMES=(emerg alert crit err warning notice info debug)	# we also use these in syslog messages, so we have to use these specific level names
+# Both of these can be independently forced to 1 or 0 in config:
+if [[ -v TTY ]]; then
+	USE_STDERR=${USE_STDERR:-1}					# by default output to stderr if there is a tty
+else
+	USE_SYSLOG=${USE_SYSLOG:-1}					# by default log to syslog if there is no tty
+fi
 
 function start_logger() { # starts a logger coprocess if one doesn't exist already
 	if [[ -z "$have_logger" ]]; then
@@ -22,13 +28,6 @@ function log() { # Usage: log <level> <message>. Consults $USE_SYSLOG.
 	local level_index=${LOG_LEVEL_NAMES[(ie)$level]}
 	local LOG_LEVEL=${LOG_LEVEL:-info}	# set a default log level if the caller did not
 	shift	# $@ holds the message now
-	if [[ -z $logger_has_id_equals ]]; then
-		if logger --help | fgrep -q -- '--id[=<id>]'; then
-			logger_has_id_equals=1
-		else
-			logger_has_id_equals=0
-		fi
-	fi
 	if ((${LOG_LEVEL_NAMES[(ie)$LOG_LEVEL]}>=level_index)); then	# is the message of high enough priority to be logged?
 		# the following possibilities exist:
 		#  * the message is either
@@ -46,15 +45,21 @@ function log() { # Usage: log <level> <message>. Consults $USE_SYSLOG.
 				local prio="<$[3*8+(level_index-1)]>" # a decimal number within angle brackets that encodes both the facility and the level. The number is constructed by multiplying the facility by 8 and then adding the level. For example, daemon.info, meaning facility=3 and level=6, becomes <30>.
 				echo $prio$@ >&p
 			else	# we need to call logger ourselves
+				if [[ -z $logger_has_id_equals ]]; then
+					if logger --help | fgrep -q -- '--id[=<id>]'; then
+						logger_has_id_equals=1	# this is a global variable, so we only need to perform this test once; the result will be "cached"
+					else
+						logger_has_id_equals=0
+					fi
+				fi
 				if ((logger_has_id_equals)); then
-					logger --stderr --tag "${me:-$0}" --id=$$ --priority daemon.$level -- "$@"
+					logger --tag "${me:-$0}" --id=$$ --priority daemon.$level -- "$@"
 				else
-					logger --stderr --tag "${me:-$0}" --id --priority daemon.$level -- "$@"
+					logger --tag "${me:-$0}" --id --priority daemon.$level -- "$@"
 				fi
 			fi
-		else
-			echo "$level: $@" >&2	# the logger coprocess only makes sense if we use syslog
 		fi
+		((USE_STDERR)) && echo "${me:-$0}: $level: $@" >&2
 	fi
 }
 	
