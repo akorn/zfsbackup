@@ -3,7 +3,11 @@
 # This is a zfsbackup helper script that should be started from a zfsbackup
 # source config directory as a pre-client script (umount-and-destroy-snapshot,
 # which is currently a symlink to this same script, should then be used as
-# a post-client script to clean up afterwards).
+# a post-client script to clean up afterwards -- TODO: don't remove an older
+# snapshot if there have been no changes to the origin fs since its
+# creation, so that check-if-changed-since-snapshot can always make sure
+# this is still the case; perhaps don't create a new snapshot if the last
+# one still saw no writes, and don't remove the most recent one?).
 #
 # This script creates a snapshot of the filesystem to be backed up and mounts
 # it; or, if called with a numeric argument, it assumes it's been called as a
@@ -366,7 +370,7 @@ function zfs_snapshot() {
 	local ret=0 snap tempdir snap_mp snapname i=0 msg
 	local prefix=$ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX
 	local zfsdataset="$(<zfs-dataset)"
-	[[ -e no-xdev ]] && log warning "no-xdev exists and you're requesting a non-recursive snapshot. This is probably not what you want. no-xdev will have no effect."
+	[[ -e no-xdev ]] && log warning "no-xdev exists and you're requesting a non-recursive snapshot. This is probably not what you want. no-xdev will have no effect (we will only back up the topmost fs)."
 	# If post-client wasn't run, it's possible the last snapshot is still mounted. Umount it now, if we can, and perform all the other cleanup if necessary.
 	zfs_snapshot_postclient
 	# If our dataset is not mounted, we can't automount the snapshot and have to mount it explicitly. Automounting is better because then we don't leave the mount around indefinitely if the post-client is not called.
@@ -404,8 +408,8 @@ typeset -U zfs_instances	# will hold a recursive list of all child filesystems o
 typeset -U all_children		# will hold a recursive list of all child objects of the tree rooted at $zfsdataset; anything that's not a filesystem automatically goes into nosnapshot
 typeset -U nosnapshot		# will hold a list of filesystems we aren't supposed to snapshot and back up. Of course, zfs snapshot -r will snapshot them anyway, but we immediately remove theri snapshots.
 typeset -A subsource_dirs	# will hold zfs-dataset->subsource_dir pairs; will be used to mount just-created snapshots under the appropriate subsource_dir/path/
-typeset -i 36 crc32	# we'll print this number in base36 to make it as short as possible
-typeset -A zfs_mp	# hash. key: zfs dataset name; value: mounpoint of dataset.
+typeset -i 36 crc32		# we'll print this number in base36 to make it as short as possible
+typeset -A zfs_mp		# hash. key: zfs dataset name; value: mounpoint of dataset.
 
 function recursive_zfs_snapshot_init() { # bits common to preclient and postclient
 	local name type f subsource_dir subsource_ds
@@ -420,10 +424,10 @@ function recursive_zfs_snapshot_init() { # bits common to preclient and postclie
 	fi
 	echo -n "$zfsdataset" | cksum | read crc32 unused
 	prefix="$ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX-${crc32##36\#}"	# The suffix includes the CRC32 of the origin fs, so that when we remove snapshots recursively, we only remove ones created as a result of this backup job, not one ones created by a recursive backup of a subtree or a higher level fs. CRC32 isn't a strong hash, but it should be good enough for this purpose.
-	# Also: if pool/fs1 mounted on /fs1 and pool/fs1/fs2 mounted on /fs2 -- since /fs2 is not under /fs1, we won't back it up; however, we also don't want to destroy any of its snapshots.
+	# Also: if pool/fs1 is mounted on /fs1 and pool/fs1/fs2 is mounted on /fs2 -- since /fs2 is not under /fs1, we won't back it up; however, we also don't want to destroy any of its snapshots.
 	IFS="$newline	"
 	[[ -r no-snapshot ]] && nosnapshot=($(<no-snapshot))	# a list of filesystems that should not be included in the recursive snapshot
-	if [[ subsources.d ]] && ! [[ -e no-xdev ]]; then	# If subsources.d exists and no-xdev does not, we assume that only the filesystems enumerated therein need to be backed up, and remove snapshots of all others.
+	if [[ subsources.d ]] && ! [[ -e no-xdev ]]; then	# If subsources.d exists and no-xdev does not, we assume that only the filesystems enumerated in subsourcsed.d need to be backed up, and remove snapshots of all others.
 		IFS="$newline"
 		find $(pwd)/. -xdev -name zfs-dataset | while read f; do
 			subsource_dir=${f:h}
@@ -499,7 +503,6 @@ function recursive_zfs_snapshot_postclient() {
 
 function recursive_zfs_snapshot() { # In this case, ./path is a directory (not a symlink), and we mount our system of recursive snapshots under it.
 # If subsources.d exists and no-xdev does not, we assume that only the filesystems enumerated therein need to be backed up, and remove snapshots of all others.
-# TODO: test
 	local unused msg snap_exists=1 i=0 z currentmp
 	local ret=0
 	
@@ -508,7 +511,7 @@ function recursive_zfs_snapshot() { # In this case, ./path is a directory (not a
 	if ! [[ -e no-xdev ]] && ! [[ -d subsources.d ]]; then
 		log warning "You're requesting recursive zfs snapshots but don't have no-xdev in $(pwd), and also no subsources.d/. This appears nonsensical; are you sure it is what you want?"
 	elif [[ -e no-xdev ]] && [[ -d subsources.d ]] && ! [[ -e nowarn.recursive.noxdev ]]; then
-		log warning "You're requesting recursive zfs snapshots and have BOTH no-xdev and subsources.d/ in $(pwd). This is not technically invalid, but unusual enough (and difficult enough to get right) to warrant a warning. Touch $(pwd)/nowarn.recursive.noxdev to silence it."
+		log warning "You're requesting recursive zfs snapshots and have BOTH no-xdev and subsources.d/ in $(pwd). This is not technically invalid, but unusual enough (and difficult enough to get right) to warrant a warning. Touch $(pwd)/nowarn.recursive.noxdev to silence this warning."
 	fi
 
 	snapname="$prefix-${EPOCHSECONDS}"
@@ -546,6 +549,7 @@ function recursive_zfs_snapshot() { # In this case, ./path is a directory (not a
 				die "Failed to recursively mount the snapshots of $zfsdataset. Aborting."
 			fi
 		done
+		echo ${(j:\n:)zfs_instances} >zfs_instances_included_in_recursive_snapshot	# This file can be read by check-if-changed-since-snapshot so it can check whether each of these filesystems changed since the backup was made
 	else
 		die "'zfs snapshot -r '$zfsdataset@$snapname' failed with status $ret_snapshot. Aborting."
 	fi
