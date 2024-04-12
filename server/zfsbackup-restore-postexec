@@ -6,7 +6,17 @@
 
 CONFIG="/etc/zfsbackup/restore-snaphot/$RSYNC_MODULE_NAME"
 
-[[ -e "$CONFIG" ]] && . "$CONFIG"	# can override $zfs_dataset. TODO: make recursive bind mounting optional (but probably still default)
+if [[ -e "$CONFIG" ]]; then
+	. "$CONFIG"	# can override $zfs_dataset. TODO: make recursive bind mounting optional (but probably still default)
+else
+	echo "I don't know what to do without $CONFIG" >&2
+	exit 0
+fi
+
+if [[ . -ef / ]]; then
+	echo "Refusing to operate on root directory" >&2
+	exit 1
+fi
 
 for i in *(/N); do
 	mountpoint -q $i/. && umount -R $i/.

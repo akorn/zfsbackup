@@ -14,6 +14,13 @@ typeset -A source_to_server # a hash whose keys are source names and whose value
 typeset -U sources_to_backup
 
 . $DEFAULT_FUNCTIONS
+
+# By default, we refuse to create backups less than four hours apart. TODO: add a temporary override mechanism to force creating a new backup. (Until then, the minimum_time_between_backups control file can be created in the pertinent source with 0 in it.)
+# This is to prevent accidentally creating too many backups (too much I/O, too many snapshots on the server).
+# The minimum time between backups is specified in seconds, and only checks the time since the last *successful* backup. Unsuccessful backups can be retried immediately.
+# TODO: consider adding a similar restriction on the server side as well, in an rsync pre-xfer script.
+export minimum_time_between_backups=${minimum_time_between_backups:-$[4*3600]}
+
 # we source the config once here, to seed the backupservers array
 [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
 [[ -n $USER_FUNCTIONS ]] && [[ -r $USER_FUNCTIONS ]] && . $USER_FUNCTIONS	# allow user functions to override default functions
@@ -123,6 +130,7 @@ function process_source() { # handles backup of a single sources.d directory; ca
 		|| rsync_options=($rsync_options --timeout=3600)
 	[[ -r username ]] && export LOGNAME=$(head -n 1 username)
 	export RSYNC_OPTIONS="${(F)rsync_options[@]}" # make this available to pre-client and post-client scripts; we do it this way because it's impossible to export arrays. Downstream scripts can get the array back using the syntax "rsync_options=(${(f)RSYNC_OPTIONS})", provided there are no meaningful newline characters in rsync_options (there shouldn't be).
+	[[ -r minimum_time_between_backups ]] && export minimum_time_between_backups=$(< minimum_time_between_backups)
 	( # subshell so that we can redirect stdout/stderr safely, as well as use 'exit'
 		local lockfile=url	# this file is known to exist; might as well use it as a lockfile. Might cause problems on read-only filesystems, but we'll cross that bridge when we get to it.
 		if ! zsystem flock -f lockfd -t 1 $lockfile; then
@@ -135,6 +143,14 @@ function process_source() { # handles backup of a single sources.d directory; ca
 
 		[[ -e stdout ]] && exec >stdout || { start_logger; exec >&p }
 		[[ -e stderr ]] && exec 2>stderr || { start_logger; exec 2>&p }
+
+		if [[ -n $minimum_time_between_backups ]]; then
+			zmodload zsh/stat
+			if [[ -e stamp-success ]] && [[ $starttime -lt $[$(zstat +mtime stamp-success)+minimum_time_between_backups] ]]; then
+				echo "$0: INFO: last successful backup of $zbSOURCENAME created less than $minimum_time_between_backups seconds ago. Skipping backup."
+				exit 0
+			fi
+		fi
 
 		if [[ -x check ]]; then
 			./check

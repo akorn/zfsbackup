@@ -101,6 +101,7 @@ of which are optional, and most of which control the behaviour of `rsync`:
  * `log-file` -- if it exists, will be passed to `rsync` as `--log-file=$(readlink -f log)`. If `log` doesn't exist, `--log-file-format` won't be passed to `rsync` either.
  * `log-file-format` -- if it exists, its contents will be passed as `--log-file-format=FORMAT`. The default format is "%B %U:%G %M %l %o %i %C	%f%L".
  * `logicalvolume` -- can either be a symlink of the form `/dev/vgname/lvname` or a file that contains a string of this form. Points to an LVM logical volume whose snapshot the `create-and-mount-snapshot` helper script should create and mount before rsync is run. This feature is untested, and the file has no effect unless the `create-and-mount-snapshot` is set up as a pre-client script.
+ * `minimum_time_between_backups` -- if it exists, specifies the minimum number of seconds than must elapse after a successful backup for the client to create another backup. If sufficient time has not elapsed, not even the check script is run. The default is 4 hours, and can also be overridden via client.conf.
  * `no-acls` -- if it exists, `-A` will not be passed to `rsync` (except if it occurs in `options`). The default is to copy POSIX ACLs.
  * `no-delete` -- if it exists, `--delete` will not be passed to `rsync` (except if it occurs in `options`). The default is to delete remote files that are no longer present locally. By default, this includes excluded files; see `no-delete-excluded` to turn that off.
  * `no-delete-excluded` -- if it exists, `--delete-excluded` will not be passed to rsync (except if it occurs in `options`). The default is to delete excluded files from the backup.
@@ -165,7 +166,7 @@ configuration as possible is necessary (but it can still be a lot).
 Note that even without using the explicit multi-server support it's possible
 to upload the same source directory to several servers; just create separate
 sources.d directories for each remote instance (e.g. `home_server1`,
-`home_server2` etc.).
+`home_server2`; `rootfs_server1`, `rootfs_server2` etc.).
 
 `check`, `pre-client` and `post-client` are started with the current working
 directory set to the sources.d directory being processed.
@@ -217,9 +218,18 @@ SCRIPTS=/usr/local/share/zfsbackup
 DEFAULTDIR=/etc/zfsbackup/client-defaults
 # Path to directory with script to run after zfsbackup-create-source:
 MKSOURCE_D=/etc/zfsbackup/mksource.d
+#
 # Used by mksource.d/create-remote-zfs:
 REMOTEBACKUPPOOL=backup
-REMOTEBACKUPPATH="$(hostname)"
+# If you want paths of local backups to have a prefix under the root of the
+# REMOTEBACKUPPOOL, set it here:
+#REMOTEBACKUPPREFIX=
+# E.g. if REMOTEBAKCUPPREFIX is "MyOrg/$(hostname)" and a local zfs instance
+# is rpool/data, then the backups would by default go into something
+# like backup/MyOrg/$(hostname)/rpool_data or
+# backup/MyOrg/$(hostname)/rpool/data, depending on how you invoke
+# zfsbackup-create-source.
+#
 # Whether to attempt to create remote zfs instance via ssh to hostname portion of url:
 CREATEREMOTEZFS=false
 # Whether to attempt to create remote rsyncd.conf stanza
@@ -240,6 +250,28 @@ BINDROOT=/mnt/zfsbackup
 # command line; maybe  instead of setting them here, you should let them
 # be inherited from the parent fs on the server):
 #DEFAULT_ZFS_PROPERTIES=(-o exec=off -o suid=off -o devices=off)
+
+# By default, we refuse to create backups less than four hours apart. The minimum_time_between_backups control file can be created in the pertinent source with 0 in it to eliminate this limit for a particular source.
+# This is to prevent accidentally creating too many backups (too much I/O, too many snapshots on the server).
+# The minimum time between backups is specified in seconds, and only checks the time since the last *successful* backup. Unsuccessful backups can be retried immediately.
+minimum_time_between_backups=${minimum_time_between_backups:-$[4*3600]}
+
+CLIENTNAME=$(hostname -f) # Will be placed in rsyncd.conf "hosts allow =" line; can be IP or hostname, or even both (separated by spaces)
+
+# These settings are used by the zfsbackup-sv runit service:
+SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# don't start backups immediately if last boot was less than this many seconds ago; sleep for ONBOOT_SLEEP seconds
+ONBOOT_SLEEP=12h			# sleep for this time after reboot before starting first backup
+EXIT_ACTION=sleep-and-exit		# can also be stop-service or just exit; see README.md
+VERBOSE=1				# setting to 0 suppresses informational messages to stderr
+# If the exit delay would result in more than $MAX_RUNTIME
+# seconds passing between successive zfsbackup-client invocations, the
+# delay is adjusted so that zfsbackup-client can be rerun at most
+# $MAX_RUNTIME seconds after the previous run. This places a limit on
+# the time spent retrying unsuccessful backups.
+MAX_RUNTIME=86400
+EXIT_SLEEP_UNTIL=1:00			# on success, wait until 1:00am
+
+USE_SYSLOG=0
 ```
 
 ##### multi-server case
@@ -266,9 +298,18 @@ SCRIPTS=/usr/local/share/zfsbackup
 DEFAULTDIR=/etc/zfsbackup/client-defaults${BACKUPSERVER:+/$BACKUPSERVER}
 # Path to directory with script to run after zfsbackup-create-source:
 MKSOURCE_D=/etc/zfsbackup/mksource.d
+#
 # Used by mksource.d/create-remote-zfs:
 REMOTEBACKUPPOOL=backup
-REMOTEBACKUPPATH="$(hostname)"
+# If you want paths of local backups to have a prefix under the root of the
+# REMOTEBACKUPPOOL, set it here:
+#REMOTEBACKUPPREFIX=
+# E.g. if REMOTEBAKCUPPREFIX is "MyOrg/$(hostname)" and a local zfs instance
+# is rpool/data, then the backups would by default go into something
+# like backup/MyOrg/$(hostname)/rpool_data or
+# backup/MyOrg/$(hostname)/rpool/data, depending on how you invoke
+# zfsbackup-create-source.
+#
 # Whether to attempt to create remote zfs instance via ssh to hostname portion of url:
 CREATEREMOTEZFS=true
 # Whether to attempt to create remote rsyncd.conf stanza
@@ -287,6 +328,28 @@ BINDROOT=/mnt/zfsbackup${BACKUPSERVER:+/$BACKUPSERVER}
 # command line; maybe  instead of setting them here, you should let them
 # be inherited from the parent fs on the server):
 #DEFAULT_ZFS_PROPERTIES=(-o exec=off -o suid=off -o devices=off)
+
+# By default, we refuse to create backups less than four hours apart. The minimum_time_between_backups control file can be created in the pertinent source with 0 in it to eliminate this limit for a particular source.
+# This is to prevent accidentally creating too many backups (too much I/O, too many snapshots on the server).
+# The minimum time between backups is specified in seconds, and only checks the time since the last *successful* backup. Unsuccessful backups can be retried immediately.
+minimum_time_between_backups=${minimum_time_between_backups:-$[4*3600]}
+
+CLIENTNAME=$(hostname -f) # Will be placed in rsyncd.conf "hosts allow =" line; can be IP or hostname, or even both (separated by spaces)
+
+# These settings are used by the zfsbackup-sv runit service:
+SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# don't start backups immediately if last boot was less than this many seconds ago; sleep for ONBOOT_SLEEP seconds
+ONBOOT_SLEEP=12h			# sleep for this time after reboot before starting first backup
+EXIT_ACTION=sleep-and-exit		# can also be stop-service or just exit; see README.md
+VERBOSE=1				# setting to 0 suppresses informational messages to stderr
+# If the exit delay would result in more than $MAX_RUNTIME
+# seconds passing between successive zfsbackup-client invocations, the
+# delay is adjusted so that zfsbackup-client can be rerun at most
+# $MAX_RUNTIME seconds after the previous run. This places a limit on
+# the time spent retrying unsuccessful backups.
+MAX_RUNTIME=86400
+EXIT_SLEEP_UNTIL=1:00			# on success, wait until 1:00am
+
+USE_SYSLOG=0
 ```
 
 #### Semi-automatic creation of sources.d directories
@@ -338,6 +401,10 @@ directory being backed up).
 		backup servers to use. See the HOWTO for details.
 -p, --path	Path to the directory to be backed up. If not specified,
 		a path symlink will not be created.
+--remotepath	Relative (to REMOTEBACKUPPOOL/REMOTEBACKUPPATHPREFIX) path on
+		the backup server to the directory (and presumably zfs
+		instance) the backups of the local files should be placed in.
+		Autogenerated by default.
 --pre[@]	Pre-client script to run. Will be copied into the pre-client.d
 		dir unless --pre@ is used, in which case a symlink will be
 		created. Can be given multiple times.
@@ -363,11 +430,15 @@ directory being backed up).
 		As of now, recursive snapshot support is most useful for
 		backups with no-xdev, where an entire client-side zfs subtree is
 		backed up to a single server-side filesystem.
---subsources	NOT IMPLEMENTED YET. Will be used to request that the zfs
-		hierarchy root and all its child filesystems be backed up
-		recursively into individual destination filesystems whose
-		hierarchy exactly matches the source filesystem hierarchy,
-		using the sub-source mechanism explained below.
+--subsources	Used to request that the zfs hierarchy root and all its child
+		filesystems (not volumes) be backed up recursively into
+		individual destination filesystems whose hierarchy exactly
+		matches the source filesystem hierarchy, using the sub-source
+		mechanism explained in the README. Implies -z and -rs.
+		Just rerun this script if you create further sub-filesystems.
+--zroot		The root of the zfs hierarchy to recursively snapshot.
+		Sets zfs-dataset-root for create-and-mount-snapshot
+		pre-client script.
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).
 		Use only -d if you're reconfiguring an existing sources.d dir.
@@ -433,7 +504,7 @@ commands via ssh.
 
 Some examples are provided.
 
-#### Using sub-sources
+#### Using subsources
 
 On zfs boxes it often happens that there is a directory tree that forms a
 single logical unit in some sense, but consists of several filesystems; for
@@ -456,7 +527,7 @@ When backing something like this up, the following features are desirable:
  * Ideally, it should be possible to skip backups of individual sub-filesystems if they haven't changed since the last backup.
    * Even more ideally, a new server-side snapshot should still be created of them even in this case.
 
-Without sub-sources you could go about it this way:
+Without subsources you could go about it this way:
 
  * Have a single `sources.d` directory on the client for the entire subtree.
    * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.
@@ -467,7 +538,7 @@ Without sub-sources you could go about it this way:
 
 This approach has the virtue of relative simplicity. However, from a success or failure perspective it's all or nothing.
 
-*With* sub-sources, it's somewhat more complicated but allows better re-use of partial configurations (such as `exclude` files), as well as skipping traversal of sub-filesystems that haven't changed since the last backup:
+*With* subsources, it's somewhat more complicated but allows better re-use of partial configurations (such as `exclude` files), as well as skipping traversal of sub-filesystems that haven't changed since the last backup:
 
  * Have a single `sources.d` directory on the client for the entire subtree.
    * Create the `recursive-snapshot` flag file and use `create-and-mount-snapshot` as a pre-client script to create a recursive snapshot before the backup.

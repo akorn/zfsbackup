@@ -25,10 +25,25 @@ mkdir sources.d
 In client.conf, if you have only one backup server, specify:
 
 ```zsh
-REMOTEBACKUPPATH=$(hostname) # Path to backups of this host, relative to backup pool root; will be used to generate commands to create necessary zfs instances
+REMOTEBACKUPPREFIX=$(hostname) # Path to backups of this host, relative to backup pool root; will be used to generate commands to create necessary zfs instances
 CLIENTNAME=$(hostname -f) # Will be placed in rsyncd.conf "hosts allow =" line; can be IP or hostname, or even both (separated by spaces)
 SCRIPTS=/usr/local/share/zfsbackup # This is the default that will be used if you don't set this variable
 FAKESUPER=true # or false if you want to run the remote rsyncd as root and save time on xattr operations
+
+# These settings are used by the zfsbackup-sv runit service:
+SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# don't start backups immediately if last boot was less than this many seconds ago; sleep for ONBOOT_SLEEP seconds
+ONBOOT_SLEEP=12h			# sleep for this time after reboot before starting first backup
+EXIT_ACTION=sleep-and-exit		# can also be stop-service or just exit; see README.md
+VERBOSE=1				# setting to 0 suppresses informational messages to stderr
+# If the exit delay would result in more than $MAX_RUNTIME
+# seconds passing between successive zfsbackup-client invocations, the
+# delay is adjusted so that zfsbackup-client can be rerun at most
+# $MAX_RUNTIME seconds after the previous run. This places a limit on
+# the time spent retrying unsuccessful backups.
+MAX_RUNTIME=86400
+EXIT_SLEEP_UNTIL=1:00			# on success, wait until 1:00am
+
+USE_SYSLOG=0
 ```
 
 If you have more than one backup server, use something like:
@@ -54,7 +69,17 @@ DEFAULTDIR=/etc/zfsbackup/client-defaults${BACKUPSERVER:+/$BACKUPSERVER}
 MKSOURCE_D=/etc/zfsbackup/mksource.d
 # Used by mksource.d/create-remote-zfs:
 REMOTEBACKUPPOOL=backup
-REMOTEBACKUPPATH="$(hostname)"
+#
+# If you want paths of local backups to have a prefix under the root of the
+# REMOTEBACKUPPOOL, set it here:
+#REMOTEBACKUPPREFIX=
+# E.g. if REMOTEBAKCUPPREFIX is "MyOrg/$(hostname)" and a local zfs instance
+# is rpool/data, then the backups would by default go into something
+# like backup/MyOrg/$(hostname)/rpool_data or
+# backup/MyOrg/$(hostname)/rpool/data, depending on how you invoke
+# zfsbackup-create-source. Since the name of the pool may already include the
+# hostname, it's not added automatically.
+#
 # Whether to attempt to create remote zfs instance via ssh to hostname portion of url.
 # If you have more than one server, you probably don't want to do this manually every
 # time. It's best if you can log on to the backup server as root using pubkey auth.
@@ -78,6 +103,23 @@ BINDROOT=/mnt/zfsbackup${BACKUPSERVER:+/$BACKUPSERVER}
 # You might want to use something like:
 #. /etc/zfsbackup/client.conf${BACKUPSERVER:+.$BACKUPSERVER}
 # to override some of the above on a per-server basis.
+
+CLIENTNAME=$(hostname -f) # Will be placed in rsyncd.conf "hosts allow =" line; can be IP or hostname, or even both (separated by spaces)
+
+# These settings are used by the zfsbackup-sv runit service:
+SLEEP_IF_NOT_UP_FOR_MORE_THAN=3600	# don't start backups immediately if last boot was less than this many seconds ago; sleep for ONBOOT_SLEEP seconds
+ONBOOT_SLEEP=12h			# sleep for this time after reboot before starting first backup
+EXIT_ACTION=sleep-and-exit		# can also be stop-service or just exit; see README.md
+VERBOSE=1				# setting to 0 suppresses informational messages to stderr
+# If the exit delay would result in more than $MAX_RUNTIME
+# seconds passing between successive zfsbackup-client invocations, the
+# delay is adjusted so that zfsbackup-client can be rerun at most
+# $MAX_RUNTIME seconds after the previous run. This places a limit on
+# the time spent retrying unsuccessful backups.
+MAX_RUNTIME=86400
+EXIT_SLEEP_UNTIL=1:00			# on success, wait until 1:00am
+
+USE_SYSLOG=0
 ```
 
 If you have only one server:
@@ -241,16 +283,14 @@ I set up LXC containers in a very specific way and will write a script to set up
 
 Assumptions:
 
- * All the lxc stuff lives under the a somepool/path zfs dataset.
+ * All the lxc stuff lives under a somepool/path zfs dataset.
  * All lxc guests have filesystems like `somepool/path/guest`, `somepool/path/guest/rootfs`, `somepool/path/guest/rootfs/{tmp,var}`, `somepool/path/guest/rootfs/{srv,srv/somedata}`.
  * You want to back up an LXC guest in a single go, using a recursive ZFS snapshot to obtain a consistent state.
  * You want similar sub-filesystems to be created on the backup server (separate `rootfs`, `rootfs/var` mounted under it, and os on).
   * This makes restoring from the latest backup very straightforward but still allows e.g. different dedup settings for `rootfs` and `rootfs/var`.
-  * Note that restoring from earlier backup snapshots will only be possible either on a per-filesystem basis, or by using bind mounts to create the appropriate hierarchy of mountpoints, constructed from the snapshots, on the backup server.
+  * Note that restoring from earlier backup snapshots will only be possible either on a per-filesystem basis, or by using bind mounts to create the appropriate hierarchy of mountpoints, constructed from the snapshots, on the backup server (as facilitated by the `zfsbackup-restore-preexec` script).
 
-## Setting up a backup with sub-sources manually
-
-Since there isn't scripted support for this yet, here is how to set it up manually. (Eventually, these instructions will help me write the pertinent script.)
+## Setting up a backup with sub-sources
 
 Example 1: a laptop called luna
 
@@ -291,21 +331,40 @@ zfs create		backup/luna/var/log/sv
 zfs create		backup/luna/var/spool
 ```
 
+### Using zfsbackup-create-source
+
+(The script would also create the remote filesystems, but it wouldn't be able
+to set `dedup=on` on some while also setting `dedup=off` on others. One way
+to do this would be to introduce additional `korn.zfsbackup` properties that
+contain hints for the properties to set on remote zfs instances used to store
+backups. TODO.)
+
+ 2. Run `zfsbackup-create-source -p luna/ROOT/debian-1 --zroot luna --subsources -z -d /etc/zfsbackup/sources.d/BACKUPSERVER/luna`
+   * Add individual, site-specific configuration like `exclude` files.
+
+That's it. NOTE: this hasn't been heavily tested yet; there may still be bugs. Review the generated configuration manually.
+
+### Manually
+
+Before scripted support for this was introduced, the only way to set it up was manually, as follows:
+
  2. Create and populate the top-level sources.d directory on the client:
 
-   * `mkdir -p /etc/zfsbackup/BACKUPSERVER/sources.d/luna`
+   * `mkdir -p /etc/zfsbackup/sources.d/BACKUPSERVER/luna`
    * Create `username`, `password`, `url`, `recursive-snapshot`; other configfiles (e.g. `exclude`) as needed.
    * Create zfs-dataset-root: `echo luna >/etc/zfsbackup/BACKUPSERVER/sources.d/luna/zfs-dataset-root`
    * Don't create `no-xdev`.
-   * Create `path`: mkdir /etc/zfsbackup/BACKUPSERVER/sources.d/luna/pat
-   * `echo luna > /etc/zfsbackup/BACKUPSERVER/sources.d/luna/zfs-dataset`
-   * `mkdir -p /etc/zfsbackup/BACKUPSERVER/sources.d/luna/subsources.d`
+   * Create `path`: mkdir /etc/zfsbackup/sources.d/BACKUPSERVER/luna/path
+   * `echo luna > /etc/zfsbackup/sources.d/BACKUPSERVER/luna/zfs-dataset`
+   * `mkdir -p /etc/zfsbackup/sources.d/BACKUPSERVER/luna/subsources.d`
    * `zfsbackup-create-source -p luna/ROOT/debian-1/var -z -d luna/subsources.d/var` etc.
    * Make sure `set-path-to-latest-zfs-snapshot` is not enabled for any sub-source; check-if-changed-since-snapshot should be, though.
    * Make sure that on the server side, the rsync stanza for the rootfs will invoke `make-snapshot` with `-r`.
     * You probably also want to make sure that the other stanzas don't invoke it at all; otherwise, all backups of the hirearchy will create multiple snapshots of destination filesystems of sub-sources.
     * TODO: make sure somehow that even with client-side parallelism, no backups started later than the one that created the initial recursive snapshot can mess up the server-side data, so that the recursive snapshot we create on the server side after the backup is really consistent.
     * TODO: provide a mechanism for make-snapshot to be invoked if a subsource is backed up separately.
+
+TODO: test if these instructions still work correctly.
 
 ## Scheduling backups
 

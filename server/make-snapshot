@@ -12,6 +12,8 @@ MINSIZE=0
 MININODES=7
 IMAGE_DEFAULT="zfsbackup-NAMEPREFIX-%Y-%m-%d-%H%M"
 SYNC_LOCK=/run/lock/zfsbackup.make-snapshot.sync.lock
+SYNC_OR_SLEEP=sleep		# whether to try invoking sync(8) to cause the 'lrefer' property of newly written filesystems to settle, or just sleep; on busy servers, sleep is probably preferable
+MAX_SLEEP=$[$(</sys/module/zfs/parameters/zfs_txg_timeout)*2]	# the maximum amount of time to sleep when SYNC_OR_SLEEP is set to 'sleep'; the default relies on a possible linuxism
 MAX_PARALLEL_SNAPSHOTS=4	# how many zfs snapshot operations should we allow to run in parallel? You can try tuning this if you find that too many snapshot requests piling up causes slowdowns. It's not guaranteed that reducing or increasing parallelism helps, but it might. If set to less than 1, there is no limit.
 SNAPSHOT_LOCK=/run/lock/zfsbackup.make-snapshot.snapshot.lock	# will get a numeric suffix for each slot specified by MAX_PARALLEL_SNAPSHOTS
 
@@ -152,43 +154,63 @@ mininodes=$(zfs get -Hp -o value ${PROPPREFIX}:mininodes "$origin")
 [[ "$mininodes" = "-" ]] && mininodes=$MININODES
 
 # Originally, this script tried to use sync -f to unconditionally sync the fs pointed to by RSYNC_MODULE_PATH.
-# Unfortunately, if many such syncs pile up they can take an hour or more to finish.
-# So this optimization was born:
+# Unfortunately, if many such syncs piled up they could take an hour or more to finish.
+# So in the next iteration, the following optimization was born:
 # 1. if we pass the minsize heuristics check without syncing, skip the sync entirely.
 # 2. if we don't, try to obtain a lock on SYNC_LOCK. If we can, run sync while holding the lock.
 # 3. if we can't, some other thread is already running the sync. We wait for it to finish, then check the minsize heuristic again.
 # 4. if we still fail it, it might be possible the previous sync got called too early and didn't sync our changes (dubious, but maybe), so we keep trying until either another sync finishes or a sync(8) we call ourselves finishes.
-tried_sync=0
-sync_attempts=0
-while ! ((tried_sync)) && ((sync_attempts < 2)); do
-	actualsize="$(zfs get -Hp -o value lrefer "$origin")"
-	df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
-	if [[ "$minsize" -gt 0 ]]; then
-		if [[ "$actualsize" -lt "$minsize" ]] && ! ((tried_sync)); then
-			# maybe we just need to sync for the lrefer value to settle; since sync is expensive, we don't do it unless it seems necessary
-			: >>$SYNC_LOCK
-			log debug "Actual size of $RSYNC_MODULE_PATH appears to be $actualsize, less than $minsize. Trying to sync() to force zfs to update metadata."
-			if zsystem flock -f lockfd -t 0 $SYNC_LOCK 2>/dev/null; then		# if we can't obtain this lock, another thread is already calling sync(); we'll just wait for it to finish.
-				tried_sync=1
-				sync
-				zsystem flock -u lockfd
+# This was still unsatisfactory as on a busy server, the single sync(8) we invoked could still take a very long time to finish and it held up 'zfs snapshot' and 'zfs destroy' operations as well, which is why the SYNC_OR_SLEEP tunable was introduced and defaults to 'sleep'.
+
+if [[ $SYNC_OR_SLEEP = sync ]]; then
+	tried_sync=0
+	sync_attempts=0
+	while ! ((tried_sync)) && ((sync_attempts < 2)); do
+		actualsize="$(zfs get -Hp -o value lrefer "$origin")"
+		df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
+		if [[ "$minsize" -gt 0 ]]; then
+			if [[ "$actualsize" -lt "$minsize" ]] && ! ((tried_sync)); then
+				# maybe we just need to sync for the lrefer value to settle; since sync is expensive, we don't do it unless it seems necessary
+				: >>$SYNC_LOCK
+				log debug "Actual size of $RSYNC_MODULE_PATH appears to be $actualsize, less than $minsize. Trying to sync() to force zfs to update metadata."
+				if zsystem flock -f lockfd -t 0 $SYNC_LOCK 2>/dev/null; then		# if we can't obtain this lock, another thread is already calling sync(); we'll just wait for it to finish.
+					tried_sync=1
+					sync
+					zsystem flock -u lockfd
+				else
+					zsystem flock -f lockfd $SYNC_LOCK	# wait for the lock; if we get it, it means the sync(8) invoked by the other process finished
+					zsystem flock -u $lockfd		# we can release it immediately; we just had to wait for the other sync(8)
+					((sync_attempts++))			# we'll try this at most twice
+				fi
 			else
-				zsystem flock -f lockfd $SYNC_LOCK	# wait for the lock; if we get it, it means the sync(8) invoked by the other process finished
-				zsystem flock -u $lockfd		# we can release it immediately; we just had to wait for the other sync(8)
-				((sync_attempts++))			# we'll try this at most twice
+				log debug "Actual size of $RSYNC_MODULE_PATH is $actualsize, at least $minsize. Skipping unnecessary sync(8)."
+				break
 			fi
 		else
-			log debug "Actual size of $RSYNC_MODULE_PATH is $actualsize, at least $minsize. Skipping unnecessary sync(8)."
 			break
 		fi
+		if ((tried_sync)) || ((sync_attempts >= 2)); then
+			log warning "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize. Setting partial=1."
+			partial=1
+		fi
+	done
+else	# anything that's not 'sync' is taken to mean 'sleep'
+	slept_secs=0
+	actualsize="$(zfs get -Hp -o value lrefer "$origin")"
+	df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
+	while ((slept_secs < MAX_SLEEP)) && [[ "$minsize" -gt 0 ]] && [[ "$actualsize" -lt "$minsize" ]]; do
+		sleep 1
+		((slept_secs++))
+		actualsize="$(zfs get -Hp -o value lrefer "$origin")"
+		df --portability -i "$RSYNC_MODULE_PATH" | tail -n 1 | read foo foo actualinodes foo
+	done
+	if [[ "$actualsize" -ge "$minsize" ]]; then
+		log debug "Actual size of $RSYNC_MODULE_PATH is $actualsize, at least $minsize. I had to sleep $slept_secs seconds for the 'lrefer' property of ${(qq)origin} to settle."
 	else
-		break
-	fi
-	if ((tried_sync)) || ((sync_attempts >= 2)); then
-		log warning "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize. Setting partial=1."
+		log warning "Actual size of $RSYNC_MODULE_PATH is $actualsize, less than $minsize, despite waiting $slept_secs seconds for the 'lrefer' property of ${(qq)origin} to settle. Setting partial=1."
 		partial=1
 	fi
-done
+fi
 
 if [[ "$mininodes" -gt 7 ]]; then
 	if [[ "$actualinodes" -lt "$mininodes" ]]; then
@@ -248,7 +270,7 @@ if [[ "$SCHEDULE_ATJOB" = "1" ]]; then
 	if ! [[ "$expires" = "never" ]]; then
 		cd /
 		echo "${(q)PATH_TO_REMOVESNAP}" \"$snapname\" \
-			| if ! at -t $(strftime "%Y%m%d%H%M.%S" "$expires") >&2; then
+			| if ! at -t $(strftime "%Y%m%d%H%M.%S" "$[expires+60]") >&2; then
 				log err "Failed to schedule atjob. Maybe at isn't installed?"
 			fi
 	fi

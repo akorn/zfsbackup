@@ -1,5 +1,7 @@
 #!/bin/zsh
 
+unsetopt FUNCTION_ARGZERO
+
 HARDLINKFILES=(
 bwlimit compress compress-level log-file-format no-acls no-delete
 no-delete-excluded no-hard-links no-inplace no-partial no-sparse no-xattrs
@@ -39,12 +41,148 @@ typeset -a zfsprops
 zfsprops=($DEFAULT_ZFS_PROPERTIES[@])
 typeset -U zbLNPRECLIENT zbLNPOSTCLIENT zbPRECLIENT zbPOSTCLIENT
 
+((zfsbackup_create_source_nesting_level++))
+export zfsbackup_create_source_nesting_level
+
+typeset -A param_description
+{	# dump_state() will print these, replacing will_be by something appropriate based on whether zbDRY_RUN is set
+	param_description[BACKUPSERVERS]="the list of backup servers read from /etc/zfsbackup/client.conf"
+	param_description[backupservers]="the list of backup servers this script iterates over (--server)"
+	param_description[BINDROOT]="the directory backup jobs will bind mount the source directory under (in an individual subdirectory)"
+	param_description[COPYFILES]="these configfiles will_be copied from DEFAULTDIR=${(qq)DEFAULTDIR} to the new sources.d directory, if present"
+	param_description[DEFAULT_ZFS_PROPERTIES]="the default zfs properties (to be set on zfs filesystems we create on backup servers) read from /etc/zfsbackup/client.conf"
+	param_description[docreate]="if 1, flagfile() was asked to create ${(qq)filename}"	# also set in flagfile() body to expand variable
+	param_description[doremove]="if 1, flagfile() was asked to remove ${(qq)filename}"	# also set in flagfile() body to expand variable
+	param_description[FAKESUPER]="whether to enable (true) or disable (false) 'fake super' in the remote rsyncd.conf snippets we generate (read from client.conf)"
+	param_description[HARDLINKFILES]="these configfiles will_be hardlinked from ${(qq)DEFAULTDIR} to the new sources.d directory, if present"
+	param_description[MKSOURCE_D]="this is where we load plugins from"
+	param_description[PROPPREFIX]="the prefix of the zfs user property names the backup system uses to record some metadata"
+	param_description[realpath]="construct_bind_path() was called to construct a pathname to bind mount this directory under"
+	param_description[REMOTEBACKUPPATH]="path under REMOTEBACKUPPOOL/REMOTBACKUPPATHPREFIX (${(qq)REMOTEBACKUPPOOL}/${(qq)REMOTEBACKUPPATHPREFIX}) on the backup server where this dataset will_be backed up to (REMOTEPATH_MANUAL=${(qq)REMOTEPATH_MANUAL} if 1, the path was specified manually, otherwise auto-generated) (--remotepath)"
+	param_description[REMOTEBACKUPPATHPREFIX]="a path under ${(qq)REMOTEBACKUPPOOL} where backups of this host will be placed (in sub-filesystems)"
+	param_description[REMOTEBACKUPPOOL]="the name of the zfs storage pool on the backup server"
+	param_description[SCRIPTS]="this is where we assume the support scripts shipped with zfsbackup are installed"
+	param_description[SNAP_CREATION_REQUESTED]="helper variable used during hanlding of --zsnap; should be 1 IFF --snap or --rsnap was passed on the command line"
+	param_description[SOURCES]="this directory is where the new sources.d directory will_be created"
+	param_description[subsources]="if 1, the recursive creation of subsources.d directories was requested"
+	param_description[zbBIND]="if 1, the user requested to perform a bind mount of the source data under a temporary bind mount during the backup"
+	param_description[zbBINDPATH]="this is the directory the source dataset would be bind mounted under for/by the backup process"
+	param_description[zbBWLIMIT]="the bandwidth limit to pass to rsync (--bwlimit)"
+	param_description[zbCHECK]="the name (and path) of a script to copy into the new sources.d directory as 'check' (--check)"
+	param_description[zbCOMPRESSLEVEL]="the compression level to pass to rsync (--compress-level)"
+	param_description[zbDRY_RUN]="if 1, we don't actually do anything, just print what would have been done"
+	param_description[zbEXCLUDEFROM]="the name of the file to install as 'exclude' in the new sources.d directory (--exclude)"
+	param_description[zbFAKESUPER]="whether there is explicit configuration to enable (1) or disable (0) 'fake super' in the remote rsyncd.conf snippets we generate (--fake-super/--no-fake-super; overrides client.conf)"
+	param_description[zbFILESFROM]="the name of the file to install as 'files' in the new sources.d directory (--files)"
+	param_description[zbFILTER]="the name of the file to install as 'filter' in the new sources.d directory (--filter)"
+	param_description[zbFORCEACLS]="if 1, no-acls flag file will_be removed (or not created) (--acls)"
+	param_description[zbFORCECOMPRESS]="if 1, no-compress flag file will_be removed (or not created) (--compress)"
+	param_description[zbFORCEDELETEEXCLUDED]="if 1, no-delete flag file will_be removed (or not created) (--delete-excluded)"
+	param_description[zbFORCEDELETE]="if 1, no-delete flag file will_be removed (or not created) (--delete)"
+	param_description[zbFORCEHARDLINKS]="if 1, no-hard-links flag file will_be removed (or not created) (--hard-links)"
+	param_description[zbFORCEINPLACE]="if 1, no-inplace flag file will_be removed (or not created) (--inplace)"
+	param_description[zbFORCEPARTIAL]="if 1, no-partial flag file will_be removed (or not created) (--partial)"
+	param_description[zbFORCESPARSE]="if 1, no-sparse flag file will_be removed (or not created) (--sparse)"
+	param_description[zbFORCEXATTRS]="if 1, no-xattrs flag file will_be removed (or not created) (--xattrs)"
+	param_description[zbFORCEXDEV]="if 1, no-xdev flag file will_be removed (or not created) (--xdev)"
+	param_description[zbINCLUDEFROM]="the name of the file to install as 'include' in the new sources.d directory (--include)"
+	param_description[zbLNCHECK]="the name (and path) of a script to symlink into the new sources.d directory as 'check' (--check@)"
+	param_description[zbLNPOSTCLIENT]="a list of post-client scriptlets that will_be symlinked to post-client.d/ in the new sources.d directory (--post@)"
+	param_description[zbLNPRECLIENT]="a list of pre-client scriptlets that will_be symlinked to pre-client.d/ in the new sources.d directory (--pre@)"
+	param_description[zbNOACLS]="if 1, no-acls flag file will_be created (--no-acls)"
+	param_description[zbNOCOMPRESS]="if 1, no-compress flag file will_be created (--no-compress)"
+	param_description[zbNODELETEEXCLUDED]="if 1, no-delete flag file will_be created (--no-delete-excluded)"
+	param_description[zbNODELETE]="if 1, no-delete flag file will_be created (--no-delete)"
+	param_description[zbNOHARDLINKS]="if 1, no-hard-links flag file will_be created (--no-hard-links)"
+	param_description[zbNOINPLACE]="if 1, no-inplace flag file will_be created (--no-inplace)"
+	param_description[zbNOPARTIAL]="if 1, no-partial flag file will_be created (--no-partial)"
+	param_description[zbNOSPARSE]="if 1, no-sparse flag file will_be created (--no-sparse)"
+	param_description[zbNOXATTRS]="if 1, no-xattrs flag file will_be created (--no-xattrs)"
+	param_description[zbNOXDEV]="if 1, no-xdev flag file will_be created (--no-xdev)"
+	param_description[zbPATH_IS_ZFS]="the data to be backed up is located in the root of a zfs filesystem (either the user said so or this has been detected)"
+	param_description[zbPATH]="path of the directory (or name of the zfs dataset) to be backed up (--path)"
+	param_description[zbPOSTCLIENT]="a list of post-client scriptlets that will_be copied to post-client.d/ in the new sources.d directory (--post)"
+	param_description[zbPRECLIENT]="a list of pre-client scriptlets that will_be copied to pre-client.d/ in the new sources.d directory (--pre)"
+	param_description[zbRECURSIVESNAPSHOT]="should be 1 IFF --rsnap was given on the command line; recursive-snapshot flag file will_be created"
+	param_description[zbSOURCENAME]="the name of the new sources.d directory to create (--dir)"
+	param_description[zbTRACEDIR]="the internal state directory where we save the last printed value of every variable"
+	param_description[zbTRACE]="if 1, we print lots of debug info"
+	param_description[zbURL]="the rsync URL to back up to (--url)"
+	param_description[zbUSERNAME]="the name of the rsync user to connect to the backup server as (--username)"
+	param_description[zbZFSDATASET]="the specified or detected zfs dataset whose root we're backing up"
+	param_description[zbZROOT]="the root of the zfs subtree we're recursively snapshotting and whose children we're backing up (--zroot)"
+	param_description[zfsbackup_create_source_nesting_level]="how deep zfsbackup-create-source invocations are nested; the first instance has 1, its children have 2 and so on"
+	param_description[zfs_instances]="the child filesystems we detected under ${(qq)zbZROOT}"
+	param_description[zfsprops]="the zfs properties that will_be actually set on zfs filesystems we create(d) (from -o and from DEFAULT_ZFS_PROPERTIES in the config)"
+}
+
+function dump_var() {	# log the value of a single variable (called by dump_state); returns 1 if the variable has the same value as last time and thus wasn't dumped
+	local EUID=65534
+	local var=$1
+	if ! [[ "$mapfile[$var]" = "${(P)var}" ]]; then
+		if [[ -z "${(P)var}" ]]; then
+			:>$var	# mapfile doesn't truncate files if the value is set to the empty string; workaround that
+		else
+			mapfile[$var]="${(P)var}"
+		fi
+		echo "$var=${(qqP)var} # $param_description[$var]"
+		return 0
+	fi
+	return 1
+}
+
+function dump_state() {	# debug function that dumps the entire parameter space (only values changed since the last invocation); $@, if specified, is printed as a prefix on each line
+	[[ -n "$@" ]] && local prefix="$@"
+	local will_be="will be/was/were"
+	((zbDRY_RUN)) && will_be="would be/would have been"
+	local i
+	zmodload zsh/mapfile || { echo "FATAL: unable to zmodload zsh/mapfile" >&2; exit $err_INTERNAL }	# this creates the special hash 'mapfile' whose keys are files and the values are the contents of the files; we use it to keep state that's persistent across child invocations and allows a child to modify the parent's state
+	if [[ -z $zbTRACEDIR ]] || [[ /. -ef $zbTRACEDIR/. ]] ||; then
+		export zbTRACEDIR=$(mktemp -d) || exit $err_INTERNAL
+		chown nobody $zbTRACEDIR
+		zbTRACEDIR=$zbTRACEDIR/trace		# since the parent is owned by nobody, we'll be able to delete the child as 'nobody'; also this is an additional layer of protection against zbTRACEDIR being the root directory
+		install -d -o nobody $zbTRACEDIR	# we'll access the contents as the nobody user to protect against accidentally overwriting something if the index to mapfile[] is wrong
+		pushd -q $zbTRACEDIR || exit $err_INTERNAL
+		popd -q
+	fi
+	[[ /. -ef $zbTRACEDIR/. ]] && { echo "FATAL: $LINENO: zbTRACEDIR appears to be identical to the root directory" >&2; exit $err_INTERNAL }
+	pushd -q $zbTRACEDIR
+	mapfile[dumped_something]=0
+	for i in ${(koi)param_description}; do dump_var $i && mapfile[dumped_something]=1; done | sed "${prefix:+s#^#$prefix:	#;}s%will_be%$will_be%g" >&2
+	if [[ $mapfile[dumped_something] = 0 ]] && [[ -n $prefix ]]; then	# allow tracing of function calls even if no variables changed since last time by at least printing the prefix
+		echo "TRACE:	$prefix:" >&2
+	fi
+	popd -q
+}
+
+function do_or_print() {	# depending on whether zbDRYRUN is set, either call $@ or print the command line
+	if ((zbDRY_RUN)); then
+		echo "dry_run:	would have called ${(qq)@}" >&2
+		return 0
+	fi
+	if ((zbTRACE)); then
+		echo "TRACE:	calling ${(qq)@}" >&2
+	fi
+	"$@"
+}
+
+function createfile() {	# args: <file> <contents>
+	local file="$1"; shift; echo "$@" >$file
+}
+
 function flagfile() {
 	local docreate="$1"
 	local doremove="$2"
 	local filename="$zbSOURCENAME"/"$3"
-	! [[ -e "$filename" ]] && ((docreate)) && (($createdbyme[$3])) && touch "$filename"
-	((doremove)) && (($createdbyme[$3])) && rm -f "$filename"
+	if ((zbTRACE)); then
+		param_description[docreate]="if 1, flagfile() was asked to create ${(qq)filename}"
+		param_description[doremove]="if 1, flagfile() was asked to remove ${(qq)filename}"
+		param_description[filename]="this is the name of the flag file the flagfile() function has been called to operate on"
+		dump_state "flagfile(${(qq)1}, ${(qq)2}, ${(qq)3}) top"
+	fi
+	! [[ -e "$filename" ]] && ((docreate)) && (($createdbyme[$3])) && do_or_print touch "$filename"
+	((doremove)) && (($createdbyme[$3])) && do_or_print rm -f "$filename"
+	((zbTRACE)) && unset "param_description[docreate]" "param_description[doremove]" "param_description[filename]" # these are only used in this function; avoid other functions dumping them in dump_state
 }
 
 function construct_bind_path() {
@@ -56,10 +194,12 @@ function construct_bind_path() {
 		*)	echo "construct_bind_path: path must be absolute for -b to work, but '$realpath' isn't. This is a bug." >&2
 			exit $err_INTERNAL;;
 	esac
+	((zbTRACE)) && dump_state 'construct_bind_path()'
 }
 
 function usage() {	# Using a here document requires a writable filesystem. Is this a problem?
-cat <<EOF
+	local plugin
+	cat <<EOF
 zfsbackup-create-source takes the following arguments (which are evaluated in
 the below order):
 
@@ -67,6 +207,10 @@ the below order):
 		backup servers to use. See the HOWTO for details.
 -p, --path	Path to the directory to be backed up. If not specified,
 		a path symlink will not be created.
+--remotepath	Relative (to REMOTEBACKUPPOOL/REMOTEBACKUPPATHPREFIX) path on
+		the backup server to the directory (and presumably zfs
+		instance) the backups of the local files should be placed in.
+		Autogenerated by default.
 --pre[@]	Pre-client script to run. Will be copied into the pre-client.d
 		dir unless --pre@ is used, in which case a symlink will be
 		created. Can be given multiple times.
@@ -89,6 +233,15 @@ the below order):
 -rs --rsnap	Install create-and-mount-snapshot as a pre-client script;
 		create recursive snapshot of the zfs instance given in -p.
 		Implies --no-xdev. Installs appropriate post-client script too.
+--subsources	Used to request that the zfs hierarchy root and all its child
+		filesystems (not volumes) be backed up recursively into
+		individual destination filesystems whose hierarchy exactly
+		matches the source filesystem hierarchy, using the sub-source
+		mechanism explained in the README. Implies -z and -rs.
+		Just rerun this script if you create further sub-filesystems.
+--zroot		The root of the zfs hierarchy to recursively snapshot.
+		Sets zfs-dataset-root for create-and-mount-snapshot
+		pre-client script.
 -d, --dir	Name of sources.d directory to create. Will try to autogenerate
 		based on --path (so one of the two must be specified).
 		Use only -d if you're reconfiguring an existing sources.d dir.
@@ -125,111 +278,136 @@ the below order):
 -X, --xattrs	Remove no-xattrs flag file.
 -x, --xdev	Remove no-xdev flag file (won't cross filesystem boundaries;
 		this is the default).
-
-See the README file for details.
+--dry-run	Don't actually do anything, just show what would be done.
+--trace		Print debug output only useful for developers.
 EOF
+	for plugin in $plugins; do
+		typeset -pf $plugin-usage >/dev/null 2>&1 && $plugin-usage
+	done
+	echo
+	echo "See the README file for details."
 }
 
-while [[ -n "$1" ]]; do
-	case "$1" in
-		-b|--bind)
-			zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/pre-bindmount")
-			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/post-bindmount")
-			zbBIND="1"
-			;;
-		-z|--zsnap)
-			((SNAP_CREATION_REQUESTED)) || zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/set-path-to-latest-zfs-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
-			zbPATH_IS_ZFS="1"
-			;;
-		-s|--snap)
-			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")	# if --zsnap was processed sooner, this script was added, but we must remove it
-			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
-			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
-			SNAP_CREATION_REQUESTED=1 # used by --zsnap handler
-			;;
-		-rs|--rsnap)
-			# TODO: set up backups of sub-filesystem as sub-jobs --
-			# * but since the set can change, this should be done from pre-client
-			# * but since pre-client can't create server-side filesystems, it should just alert and maybe cause the backup to be partial
-			temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")	# if --zsnap was processed sooner, this script was added, but we must remove it
-			zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
-			zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
-			SNAP_CREATION_REQUESTED=1 # used by --zsnap handler
-			export zbRECURSIVESNAPSHOT=1; zbNOXDEV="1"; zbFORCEXDEV="0"
-			;;
-		--server)		shift;	backupservers=(${=1//,/ });;
-		-p|--path)		shift;	zbPATH="$1";;
-		--pre)			shift;	zbPRECLIENT=($zbPRECLIENT "$1");;
-		--pre@)			shift;	zbLNPRECLIENT=($zbLNPRECLIENT "$1");;
-		--post)			shift;	zbPOSTCLIENT=($zbPOSTCLIENT "$1");;
-		--post@)		shift;	zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$1");;
-		-c|--check)		shift;	zbCHECK="$1";;
-		--check@)		shift;	zbLNCHECK="$1";;
-		-d|--dir)		shift;	zbSOURCENAME="$1";;
-		-u|--username)		shift;	zbUSERNAME="$1";;
-		-e|--exclude)		shift;	zbEXCLUDEFROM="$1";;
-		-i|--include)		shift;	zbINCLUDEFROM="$1";;
-		--files)		shift;	zbFILESFROM="$1";;
-		-f|--filter)		shift;	zbFILTER="$1";;
-		--no-sparse) 			zbNOSPARSE="1"; zbFORCESPARSE="0";;
-		-S|--sparse) 			zbFORCESPARSE="1"; zbNOSPARSE="0";;
-		--no-xattrs) 			zbNOXATTRS="1"; zbFORCEXATTRS="0";;
-		-X|--xattrs) 			zbFORCEXATTRS="1"; zbNOXATTRS="0";;
-		--no-acls) 			zbNOACLS="1"; zbFORCEACLS="0";;
-		-A|--acls) 			zbFORCEACLS="1"; zbNOACLS="0";;
-		--no-hard-links) 		zbNOHARDLINKS="1"; zbFORCEHARDLINKS="0";;
-		-H|--hard-links) 		zbFORCEHARDLINKS="1"; zbNOHARDLINKS="0";;
-		--delete) 			zbFORCEDELETE="1"; zbNODELETE="0";;
-		--delete-excluded)		zbFORCEDELETEEXCLUDED="1"; zbNODELETEEXCLUDED="0";;
-		--no-delete) 			zbNODELETE="1"; zbFORCEDELETE="0";;
-		--no-delete-excluded)		zbNODELETEEXCLUDED="1"; zbFORCEDELETEEXCLUDED="0";;
-		--no-partial) 			zbNOPARTIAL="1"; zbFORCEPARTIAL="0";;
-		-P|--partial) 			zbFORCEPARTIAL="1"; zbNOPARTIAL="0";;
-		--no-xdev) 			zbNOXDEV="1"; zbFORCEXDEV="0";;
-		-x|--xdev) 			zbFORCEXDEV="1"; zbNOXDEV="0";;
-		--no-inplace) 			zbNOINPLACE="1"; zbFORCEINPLACE="0";;
-		--inplace) 			zbFORCEINPLACE="1"; zbNOINPLACE="0";;
-		--compress) 			zbCOMPRESS="1"; zbNOCOMPRESS="0";;
-		--no-compress) 			zbNOCOMPRESS="1"; zbCOMPRESS="0";;
-		--compress-level)	shift;	zbCOMPRESSLEVEL="$1";;
-		--bwlimit)		shift;	zbBWLIMIT="$1";;
-		--url)			shift;	zbURL="$1";;
-		--fake-super)		export	zbFAKESUPER=1;;
-		--no-fake-super)	export	zbFAKESUPER=0;;
-		-o)			shift; zfsprops=($zfsprops[@] -o "$1");;
-	esac
-	shift
-done
+function parseargs() {
+	local i
+	((zbTRACE)) && dump_state 'parseargs() top'
+	while [[ -n "$1" ]]; do
+		case "$1" in
+			-b|--bind)
+				zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/pre-bindmount")
+				zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/post-bindmount")
+				zbBIND="1"
+				;;
+			-s|--snap)
+				temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")	# if --zsnap was processed sooner, this script was added, but we must remove it
+				zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
+				zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
+				SNAP_CREATION_REQUESTED=1 # used by --zsnap handler
+				;;
+			--subsources)			export subsources=1;&
+			-rs|--rsnap)
+				# challenges when setting up backups of sub-filesystems as sub-jobs:
+				# * since the set can change, pre-client should ideally create new sub-jobs if necessary
+				# * but since pre-client can't create server-side filesystems, it should just alert and maybe cause the backup to be partial
+				temparray=("$SCRIPTS/client/set-path-to-latest-zfs-snapshot")	# if --zsnap was processed sooner, this script was added, but we must remove it
+				zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/create-and-mount-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
+				zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$SCRIPTS/client/umount-and-destroy-snapshot")
+				SNAP_CREATION_REQUESTED=1 # used by --zsnap handler
+				export zbRECURSIVESNAPSHOT=1; zbNOXDEV="1"; zbFORCEXDEV="0"
+				;&
+			-z|--zsnap)
+				((SNAP_CREATION_REQUESTED)) || zbLNPRECLIENT=($zbLNPRECLIENT "$SCRIPTS/client/set-path-to-latest-zfs-snapshot" "$SCRIPTS/client/check-if-changed-since-snapshot")
+				zbPATH_IS_ZFS="1"
+				;;
+			--server)		shift;	backupservers=(${=1//,/ });;			# if we got passed a comma separated list, remove the commas and split the string into words
+			-p|--path)		shift;	zbPATH="$1";;
+			--zroot)		shift;	zbZROOT="$1"; param_description[zfs_instances]="the child filesystems we detected under ${(qq)zbZROOT}";;					# used to set zfs-dataset-root for create-and-mount-snapshot script
+			--remotepath)		shift;	REMOTEBACKUPPATH="$1"; REMOTEPATH_MANUAL=1;;
+			--pre)			shift;	zbPRECLIENT=($zbPRECLIENT "$1");;
+			--pre@)			shift;	zbLNPRECLIENT=($zbLNPRECLIENT "$1");;
+			--post)			shift;	zbPOSTCLIENT=($zbPOSTCLIENT "$1");;
+			--post@)		shift;	zbLNPOSTCLIENT=($zbLNPOSTCLIENT "$1");;
+			-c|--check)		shift;	zbCHECK="$1";;
+			--check@)		shift;	zbLNCHECK="$1";;
+			-d|--dir)		shift;	zbSOURCENAME="$1";;
+			-u|--username)		shift;	zbUSERNAME="$1";;
+			-e|--exclude)		shift;	zbEXCLUDEFROM="$1";;
+			-i|--include)		shift;	zbINCLUDEFROM="$1";;
+			--files)		shift;	zbFILESFROM="$1";;
+			-f|--filter)		shift;	zbFILTER="$1";;
+			--no-sparse) 			zbNOSPARSE="1"; zbFORCESPARSE="0";;
+			-S|--sparse) 			zbFORCESPARSE="1"; zbNOSPARSE="0";;
+			--no-xattrs) 			zbNOXATTRS="1"; zbFORCEXATTRS="0";;
+			-X|--xattrs) 			zbFORCEXATTRS="1"; zbNOXATTRS="0";;
+			--no-acls) 			zbNOACLS="1"; zbFORCEACLS="0";;
+			-A|--acls) 			zbFORCEACLS="1"; zbNOACLS="0";;
+			--no-hard-links) 		zbNOHARDLINKS="1"; zbFORCEHARDLINKS="0";;
+			-H|--hard-links) 		zbFORCEHARDLINKS="1"; zbNOHARDLINKS="0";;
+			--delete) 			zbFORCEDELETE="1"; zbNODELETE="0";;
+			--delete-excluded)		zbFORCEDELETEEXCLUDED="1"; zbNODELETEEXCLUDED="0";;
+			--no-delete) 			zbNODELETE="1"; zbFORCEDELETE="0";;
+			--no-delete-excluded)		zbNODELETEEXCLUDED="1"; zbFORCEDELETEEXCLUDED="0";;
+			--no-partial) 			zbNOPARTIAL="1"; zbFORCEPARTIAL="0";;
+			-P|--partial) 			zbFORCEPARTIAL="1"; zbNOPARTIAL="0";;
+			--no-xdev) 			zbNOXDEV="1"; zbFORCEXDEV="0";;
+			-x|--xdev) 			zbFORCEXDEV="1"; zbNOXDEV="0";;
+			--no-inplace) 			zbNOINPLACE="1"; zbFORCEINPLACE="0";;
+			--inplace) 			zbFORCEINPLACE="1"; zbNOINPLACE="0";;
+			--compress) 			zbCOMPRESS="1"; zbNOCOMPRESS="0";;
+			--no-compress) 			zbNOCOMPRESS="1"; zbCOMPRESS="0";;
+			--compress-level)	shift;	zbCOMPRESSLEVEL="$1";;
+			--bwlimit)		shift;	zbBWLIMIT="$1";;
+			--url)			shift;	zbURL="$1";;
+			--fake-super)		export	zbFAKESUPER=1;;
+			--no-fake-super)	export	zbFAKESUPER=0;;
+			-o)			shift;	zfsprops=($zfsprops[@] -o "$1");;
+			--dry-run)		export	zbDRY_RUN=1;;
+			--trace)		export	zbTRACE=1;;
+			*)	for i in $plugins; do
+					if typeset -pf $i-parseargs >/dev/null 2>&1; then
+						unset shift parsed
+						$i-argparse $@
+						if ((parsed)); then				# parseargs() functions of plugins must set parsed=1 if they understood an option, and $shift to the number of *additional* arguments they processed, if any
+							((shift)) && shift ${shift:-1}
+							break
+						fi
+					fi
+				done
+				if ! ((parsed)); then
+					echo "ERROR: $1 not understood in this context." >&2
+					usage
+					exit $err_USAGE
+				fi
+				;;
+		esac
+		shift
+	done
+	((zbTRACE)) && dump_state 'parseargs() bottom'
+}
 
-if [[ -z "$zbSOURCENAME" ]] && [[ -z "$zbPATH" ]]; then
-	echo "Sorry, either --dir or --path must be specified." >&2
-	usage
-	exit $err_USAGE
-fi
+function sanity_check() {
+	((zbTRACE)) && dump_state 'sanity_check() top'
+	local i
+	[[ -z "$zbSOURCENAME" ]]    && [[ -z "$zbPATH" ]]		&& echo "Sorry, either --dir or --path must be specified." >&2	&& usage														&& exit $err_USAGE
+	[[ "$zbPATH_IS_ZFS" = 1 ]]  && [[ -z "$zbPATH" ]]		&& echo "Please supply --path." >&2				&& usage														&& exit $err_USAGE
+	[[ $#backupservers -gt 1 ]] && [[ -n "$zbURL" ]]		&& echo "You specified --url and multiple backup servers. Multi-server support assumes that URLs will be auto-generated from templates. See README." >&2				&& exit $err_USAGE
+	[[ $#backupservers -gt 1 ]] && [[ "$zbSOURCENAME[1]" = / ]]	&& echo "You specified an absolute directory using -d, but multiple backup servers. This doesn't work; we need a separate sources.d directory for every {server,path} tuple." >&2	&& exit $err_USAGE
+	[[ "$zbPATH_IS_ZFS" = 1 ]]  && [[ "$zbBIND" = 1 ]]		&& echo "-b and -z are mutually exclusive." >&2																		&& exit $err_USAGE
 
-if [[ $#backupservers -gt 1 ]] && [[ -n "$zbURL" ]]; then
-	echo "You specified --url and multiple backup servers. Multi-server support assumes that URLs will be auto-generated from templates. See README." >&2
-	exit $err_USAGE
-fi
+	for i in $plugins; do
+		typeset -pf $i-sanity_check >/dev/null 2>&1 && $i-sanity_check
+	done
+	((zbTRACE)) && dump_state 'sanity_check() bottom'
+}
 
-if [[ $#backupservers -gt 1 ]] && [[ "$zbSOURCENAME[1]" = / ]]; then
-	echo "You specified an absolute directory using -d, but multiple backup servers. This doesn't work; we need a separate sources.d directory for every {server,path} tuple." >&2
-	exit $err_USAGE
-fi
-
-if [[ "$zbPATH_IS_ZFS" = 1 ]] && [[ "$zbBIND" = 1 ]]; then
-	echo "-b and -z are mutually exclusive." >&2
-	exit $err_USAGE
-fi
-
-# the array contains at least one item (the empty string)
-for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell because we keep modifying inherited variables, but each iteration should see them as they were after command line processing
-
-	# we have to source the config here so that $BACKUPSERVER can be expanded in it where needed
-	[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
-
+function set_zbSOURCENAME() {	# sets zbSOURCENAME if not set on command line
+	local i
+	((zbTRACE)) && dump_state 'set_zbSOURCENAME() top'
+	for i in $plugins; do
+		typeset -pf $i-set_zbSOURCENAME_top >/dev/null 2>&1 && $i-set_zbSOURCENAME_top
+	done
 	if [[ -z "$zbSOURCENAME" ]]; then	# the user didn't specify -d, so auto-generate zbSOURCENAME (this is the intended usage)
-		temppath=$zbPATH	# zbPATH must be set here, because we error out earlier if neither --dir nor --path is supplied
+		local temppath=$zbPATH	# zbPATH must be set here, because we error out earlier if neither --dir nor --path is supplied
 		if [[ "$zbPATH_IS_ZFS" = 1 ]]; then	
 			# if we were given the name of a zfs dataset it shouldn't start with a slash
 			# TODO: make the generated source name identical whether we specified -z or not (by generating the source name from the mountpoint, not the zfs instance name)
@@ -263,7 +441,62 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		# if not, prepend the path to $SOURCES (if yes, we use it verbatim)
 		zbSOURCENAME="$SOURCES/$zbSOURCENAME"
 	fi
+	export zbSOURCENAME
+	for i in $plugins; do
+		typeset -pf $i-set_zbSOURCENAME_bottom >/dev/null 2>&1 && $i-set_zbSOURCENAME_bottom
+	done
+	((zbTRACE)) && dump_state 'set_zbSOURCENAME() bottom'
+}
 
+function construct_REMOTEBACKUPPATH() {
+	local i
+	((zbTRACE)) && dump_state 'construct_REMOTEBACKUPPATH() top'
+	for i in $plugins; do
+		typeset -pf $i-construct_REMOTEBACKUPPATH_top >/dev/null 2>&1 && $i-construct_REMOTEBACKUPPATH_top
+	done
+	if ((REMOTEPATH_MANUAL)); then			# Were we given a specific remote path? If yes, we'll use it also to generate the rsync module name; if not, generate it first from zbSOURCENAME
+		REMOTEBACKUPPATH=$REMOTEBACKUPPATH
+	else
+		REMOTEBACKUPPATH=$REMOTEBACKUPPATH/${zbSOURCENAME:t}
+	fi
+	export REMOTEBACKUPPATH
+	for i in $plugins; do
+		typeset -pf $i-construct_REMOTEBACKUPPATH_bottom >/dev/null 2>&1 && $i-construct_REMOTEBACKUPPATH_bottom
+	done
+	((zbTRACE)) && dump_state 'construct_REMOTEBACKUPPATH() bottom'
+}
+
+function construct_zbURL() { # determine/set zbURL (destination URL for backups)
+	local i
+	((zbTRACE)) && dump_state 'construct_zbURL() top'
+	for i in $plugins; do
+		typeset -pf $i-construct_zbURL_top >/dev/null 2>&1 && $i-construct_zbURL_top
+	done
+	if [[ -n "$zbURL" ]]; then
+		do_or_print createfile "$zbSOURCENAME/url" "$zbURL" # we were given a specific URL (not the intended usage, but supported; in this case, even overwrite existing url file)
+	elif [[ -r "$zbSOURCENAME/url" ]]; then
+		zbURL="$(head -n 1 "$zbSOURCENAME/url")"	# We must set this for mksource.d scripts
+	elif [[ -r $DEFAULTDIR/url-template ]]; then
+		zbURL="$(sed "s/__PATH__/backup_${REMOTEBACKUPPATH//\//_}/g" <$DEFAULTDIR/url-template)"
+		do_or_print createfile "$zbSOURCENAME/url" "$zbURL"
+	else
+		echo "Unable to determine backup URL; no $DEFAULTDIR/url-template, no --url and no $zbSOURCENAME/url provided." >&2
+		exit $err_USAGE
+	fi
+	export zbURL
+	for i in $plugins; do
+		typeset -pf $i-construct_zbURL_bottom >/dev/null 2>&1 && $i-construct_zbURL_bottom
+	done
+	((zbTRACE)) && dump_state 'construct_zbURL() bottom'
+}
+
+
+function populate_sourcedir() {	# if necessary, create $zbSOURCENAME directory and create necessary files in it
+	local i
+	((zbTRACE)) && dump_state 'populate_sourcedir() top'
+	for i in $plugins; do
+		typeset -pf $i-populate_sourcedir_top >/dev/null 2>&1 && $i-populate_sourcedir_top
+	done
 	if [[ -d "$zbSOURCENAME" ]]; then
 		read "response?Warning: $zbSOURCENAME already exists. Do you want me to populate it with new defaults from $DEFAULTDIR [y/n]? "
 		case "$response" in
@@ -274,7 +507,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		esac
 	fi
 	
-	# perform a zbBIND related sanity check before creating $zbSOURCENAME if it doesn't exist
+	# perform a zbBIND related sanity check before creating $zbSOURCENAME if it doesn't exist; this can't go into sanity_check() because it needs to be done for each backupserver separately222
 	if [[ "$zbBIND" = 1 ]]; then
 		# determine/set zbPATH (path to back up)
 		if [[ -z "$zbPATH" ]]; then
@@ -299,7 +532,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 	# end zbBIND sanity check
 
 	# Now, if $zbSOURCENAME doesn't exist, we create it
-	[[ -d "$zbSOURCENAME" ]] || mkdir -p "$zbSOURCENAME" || {
+	[[ -d "$zbSOURCENAME" ]] || do_or_print mkdir -p "$zbSOURCENAME" || {
 		echo "FATAL: Couldn't create $zbSOURCENAME." >&2
 		exit $err_CANTCREATEDIR
 	}
@@ -308,7 +541,7 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 
 	if ((zbPATH_IS_ZFS)); then	# explicitly specified to be zfs
 		if [[ -n "$zbPATH" ]]; then
-			echo "$zbPATH" > "$zbSOURCENAME/zfs-dataset"
+			do_or_print createfile "$zbSOURCENAME/zfs-dataset" "$zbPATH"
 		elif ! [[ -r "$zbSOURCENAME/zfs-dataset" ]]; then
 			echo "Warning: --zsnap specified without --path. Results are undefined." >&2
 		else
@@ -319,86 +552,98 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		# happens to be zfs, and the backup starts at its root
 		export zbZFSDATASET="$(findmnt -n -o SOURCE "$zbPATH")"
 		export zbPATH_IS_ZFS="1"
-		[[ -e $zbSOURCENAME/zfs-dataset ]] || echo "$zbZFSDATASET" >$zbSOURCENAME/zfs-dataset
+		[[ -e $zbSOURCENAME/zfs-dataset ]] || do_or_print createfile "$zbSOURCENAME"/zfs-dataset "$zbZFSDATASET"
 	fi
 
 	# we track what files we create, because command line options may request us to delete some of them afterwards
 	unset createdbyme
 	typeset -A createdbyme
 	for i in $HARDLINKFILES[@]; do
-		if [[ -e "$DEFAULTDIR/$i" ]] && ln "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence no -f
+		if [[ -e "$DEFAULTDIR/$i" ]] && do_or_print ln "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence no -f
 			createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
 		fi
 	done
 
 	for i in $COPYFILES[@]; do
-		if [[ -e "$DEFAULTDIR/$i" ]] && cp -an "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence -n
+		if [[ -e "$DEFAULTDIR/$i" ]] && do_or_print cp -a --update=none "$DEFAULTDIR/$i" "$zbSOURCENAME"/; then # Never overwrite existing files with defaults, hence --update=none
 			createdbyme[$i]=1 # So we can later remove files we were asked to remove, but only if we were the ones who put them there
 		fi
 	done
 
-	# determine/set zbURL (destination URL for backups)
-	if [[ -n "$zbURL" ]]; then
-		echo "$zbURL" >"$zbSOURCENAME/url" # we were given a specific URL (not the intended usage, but supported; in this case, even overwrite existing url file)
-	elif [[ -r "$zbSOURCENAME/url" ]]; then
-		zbURL="$(head -n 1 "$zbSOURCENAME/url")"	# We must set this for mksource.d scripts
-	elif [[ -r $DEFAULTDIR/url-template ]]; then
-		zbURL="$(sed "s/__PATH__/backup_${REMOTEBACKUPPATH//\//_}_${zbSOURCENAME:t}/g" <$DEFAULTDIR/url-template)"
-		echo "$zbURL" >"$zbSOURCENAME/url"
-	else
-		echo "Unable to determine backup URL; no $DEFAULTDIR/url-template, no --url and no $zbSOURCENAME/url provided." >&2
-		exit $err_USAGE
-	fi
+	construct_REMOTEBACKUPPATH
+	construct_zbURL
 
 	if [[ "$zbBIND" = 1 ]]; then
 		construct_bind_path "$zbPATH"
 		# At this point, zbBINDPATH is set.
-		ln -ns "$zbBINDPATH" "$zbSOURCENAME"/path	# -n avoids creating symlink under path/, but may print a harmless error message if path exists already
-		ln -ns "$zbPATH" "$zbSOURCENAME"/realpath
+		do_or_print ln -ns "$zbBINDPATH" "$zbSOURCENAME"/path	# -n avoids creating symlink under path/, but may print a harmless error message if path exists already
+		do_or_print ln -ns "$zbPATH" "$zbSOURCENAME"/realpath
 	else
-		[[ "$zbPATH[1]" = / ]] && ln -ns "$zbPATH" "$zbSOURCENAME"/path
+		[[ "$zbPATH[1]" = / ]] && do_or_print ln -ns "$zbPATH" "$zbSOURCENAME"/path
 	fi
 	
+	if [[ $zfsbackup_create_source_nesting_level -gt 1 ]]; then	# we're setting up a sub-source; there are some scripts we only want to run for the main source
+		((zbTRACE)) && dump_state "populate_sourcedir() subsource logic top"
+		temparray=("$SCRIPTS/client/create-and-mount-snapshot")
+		zbLNPRECLIENT=(${zbLNPRECLIENT:|temparray} "$SCRIPTS/client/check-if-changed-since-snapshot")
+		temparray=("$SCRIPTS/client/umount-and-destroy-snapshot")
+		zbLNPOSTCLIENT=(${zbLNPOSTCLIENT:|temparray})
+		zbRECURSIVESNAPSHOT=0	# this would only make sense if the snapshot-creation pre-client script were installed, but it isn't
+		zbNOXDEV=1		# sub-sources don't need to traverse child filesystems; the child filesystems will be backed up by their own sub-source
+		zbFORCEXDEV=0
+		((zbTRACE)) && dump_state "populate_sourcedir() subsource logic bottom"
+	fi
+
 	# since these were explicitly given by the user on the command line, they override whatever was there in the zbSOURCENAME dir before
 	if [[ -n "$zbPRECLIENT" ]]; then
-		mkdir -p $zbSOURCENAME/pre-client.d
-		cp -a $zbPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
+		do_or_print mkdir -p $zbSOURCENAME/pre-client.d
+		do_or_print cp -a $zbPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
 	fi
 	if [[ -n "$zbLNPRECLIENT" ]]; then
-		mkdir -p $zbSOURCENAME/pre-client.d
-		ln -sf $zbLNPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
+		do_or_print mkdir -p $zbSOURCENAME/pre-client.d
+		do_or_print ln -sf $zbLNPRECLIENT[@] "$zbSOURCENAME"/pre-client.d/
 	fi
 	if [[ -n "$zbPOSTCLIENT" ]]; then
-		mkdir -p $zbSOURCENAME/post-client.d
-		cp -a $zbPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
+		do_or_print mkdir -p $zbSOURCENAME/post-client.d
+		do_or_print cp -a $zbPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
 	fi
 	if [[ -n "$zbLNPOSTCLIENT" ]]; then
-		mkdir -p $zbSOURCENAME/post-client.d
-		ln -sf $zbLNPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
+		do_or_print mkdir -p $zbSOURCENAME/post-client.d
+		do_or_print ln -sf $zbLNPOSTCLIENT[@] "$zbSOURCENAME"/post-client.d/
 	fi
-	[[ -n "$zbCHECK" ]] && cp -a "$zbCHECK" "$zbSOURCENAME"/check
-	[[ -n "$zbLNCHECK" ]] && ln -sf "$zbLNCHECK" "$zbSOURCENAME"/check
-	[[ -n "$zbUSERNAME" ]] && echo "$zbUSERNAME" >"$zbSOURCENAME"/username
-	[[ -z "$zbUSERNAME" ]] && [[ -f "$zbSOURCENAME/username" ]] && zbUSERNAME="$(head -n 1 $zbSOURCENAME/username)"
-	[[ -n "$zbEXCLUDEFROM" ]] && cp "$zbEXCLUDEFROM" "$zbSOURCENAME"/exclude
-	[[ -n "$zbINCLUDEFROM" ]] && cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
-	[[ -n "$zbFILESFROM" ]] && cp "$zbFILESFROM" "$zbSOURCENAME"/files
-	[[ -n "$zbFILTER" ]] && cp "$zbFILTER" "$zbSOURCENAME"/filter
-	((zbRECURSIVESNAPSHOT)) && echo 1 >$zbSOURCENAME/recursive-snapshot
-	flagfile "$zbCOMPRESS" "$zbNOCOMPRESS" compress
-	flagfile "$zbNOACLS" "$zbFORCEACLS" no-acls
-	flagfile "$zbNODELETEEXCLUDED" "$zbFORCEDELETEEXCLUDED" no-delete-excluded
-	flagfile "$zbNODELETE" "$zbFORCEDELETE" no-delete
-	flagfile "$zbNOHARDLINKS" "$zbFORCEHARDLINKS" no-hard-links
-	flagfile "$zbNOINPLACE" "$zbFORCEINPLACE" no-inplace
-	flagfile "$zbNOPARTIAL" "$zbFORCEPARTIAL" no-partial
-	flagfile "$zbNOSPARSE" "$zbFORCESPARSE" no-sparse
-	flagfile "$zbNOXATTRS" "$zbFORCEXATTRS" no-xattrs
-	flagfile "$zbNOXDEV" "$zbFORCEXDEV" no-xdev
-	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
-	[[ -n "$zbCOMPRESSLEVEL" ]] && echo "$zbCOMPRESSLEVEL" >"$zbSOURCENAME"/compress-level
-	[[ -n "$zbBWLIMIT" ]] && echo "$zbBWLIMIT" >"$zbSOURCENAME"/bwlimit
+	[[ -n "$zbCHECK" ]]		&& do_or_print cp -a "$zbCHECK" "$zbSOURCENAME"/check
+	[[ -n "$zbLNCHECK" ]]		&& do_or_print ln -sf "$zbLNCHECK" "$zbSOURCENAME"/check
+	[[ -z "$zbUSERNAME" ]]		&& [[ -f "$zbSOURCENAME/username" ]] && zbUSERNAME="$(head -n 1 $zbSOURCENAME/username)"
+	[[ -n "$zbEXCLUDEFROM" ]]	&& do_or_print cp "$zbEXCLUDEFROM" "$zbSOURCENAME"/exclude
+	[[ -n "$zbINCLUDEFROM" ]]	&& do_or_print cp "$zbINCLUDEFROM" "$zbSOURCENAME"/include
+	[[ -n "$zbFILESFROM" ]]		&& do_or_print cp "$zbFILESFROM" "$zbSOURCENAME"/files
+	[[ -n "$zbFILTER" ]]		&& do_or_print cp "$zbFILTER" "$zbSOURCENAME"/filter
+	[[ -n "$zbUSERNAME" ]]		&& do_or_print createfile "$zbSOURCENAME"/username "$zbUSERNAME" 
+	[[ -n "$zbCOMPRESSLEVEL" ]]	&& do_or_print createfile "$zbSOURCENAME"/compress-level "$zbCOMPRESSLEVEL" 
+	[[ -n "$zbBWLIMIT" ]]		&& do_or_print createfile "$zbSOURCENAME"/bwlimit "$zbBWLIMIT" 
+	((zbRECURSIVESNAPSHOT))		&& do_or_print createfile "$zbSOURCENAME"/recursive-snapshot 1
+	flagfile "$zbCOMPRESS"		"$zbNOCOMPRESS"			compress
+	flagfile "$zbNOACLS"		"$zbFORCEACLS"			no-acls
+	flagfile "$zbNODELETEEXCLUDED"	"$zbFORCEDELETEEXCLUDED"	no-delete-excluded
+	flagfile "$zbNODELETE"		"$zbFORCEDELETE"		no-delete
+	flagfile "$zbNOHARDLINKS"	"$zbFORCEHARDLINKS"		no-hard-links
+	flagfile "$zbNOINPLACE"	"$zbFORCEINPLACE"		no-inplace
+	flagfile "$zbNOPARTIAL"	"$zbFORCEPARTIAL"		no-partial
+	flagfile "$zbNOSPARSE"		"$zbFORCESPARSE"		no-sparse
+	flagfile "$zbNOXATTRS"		"$zbFORCEXATTRS"		no-xattrs
+	flagfile "$zbNOXDEV"		"$zbFORCEXDEV"			no-xdev
+	if ((subsources)) && ! [[ $zbSOURCENAME =~ /subsources.d/ ]]; then
+		zbZROOT=${zbZROOT:-$zbPATH}
+		param_description[zfs_instances]="the child filesystems we detected under ${(qq)zbZROOT}"
+		do_or_print createfile "$zbSOURCENAME"/zfs-dataset-root "$zbZROOT"
+	fi
+	for i in $plugins; do
+		typeset -pf $i-populate_sourcedir_bottom >/dev/null 2>&1 && $i-populate_sourcedir_bottom
+	done
+	((zbTRACE)) && dump_state 'populate_sourcedir() bottom'
+}
 
+function call_mksource_d() {
 	# this fugly hack is one of the ways to export an array (could also use newlines to separate elements, but since we're passing this to ssh, the quoting can actually be useful -- maybe we should even use (qq))
 	if [[ -n "$zfsprops" ]]; then
 		for i in {1..$#zfsprops}; do
@@ -408,9 +653,131 @@ for BACKUPSERVER in "$backupservers[@]"; do ( # we run this in a subshell becaus
 		unset zbZFSPROPS
 	fi
 	if [[ -n "$MKSOURCE_D" ]] && [[ -d "$MKSOURCE_D/." ]]; then
-		export BACKUPSERVER zbFAKESUPER zbFORCEACLS zbFORCEXATTRS \
-			zbNOACLS zbNOXATTRS zbPATH zbPATH_IS_ZFS \
-			zbSOURCENAME zbURL zbUSERNAME zbZFSPROPS zbZFSDATASET
-		run-parts -v -u $(umask) "$MKSOURCE_D"
+		local i
+		for i in ${(k)param_description}; do	# make our internal variables available to scripts we invoke
+			export $i
+		done
+		local f
+		for f in $MKSOURCE_D/*(N); do # these scriptlets are expected to honour zbDRYRUN as well
+			case $f in
+				*.plugin)	continue;;		# filename ends in .plugin; skip it
+				*.zsh)		. $f;;			# shell script; source it
+				*)		[[ -x $f ]] && $f;;	# other program; run it
+			esac
+		done
 	fi
-) done # for BACKUPSERVER in $backupservers[@]; do
+}
+
+if [[ -c "$TTY" ]] && [[ $(readlink -f /dev/stdout) -ef $(readlink -f $TTY) ]] && autoload colors && colors 2>/dev/null; then
+	BLUE="${fg_bold[blue]}"
+	RED="${fg_bold[red]}"
+	GREEN="${fg_bold[green]}"
+	CYAN="${fg_bold[cyan]}"
+	MAGENTA="${fg_bold[magenta]}"
+	YELLOW="${fg_bold[yellow]}"
+	WHITE="${fg_bold[white]}"
+	NO_COLOR="${reset_color}"
+fi
+
+typeset -U plugins
+if [[ -d $MKSOURCE_D/. ]]; then
+        for plugin in $MKSOURCE_D/*.plugin; do
+                unset this_plugin
+                . $plugin
+                plugins=($plugins $this_plugin)
+                typeset -pf $this_plugin-init >/dev/null 2>&1 && $this_plugin-init
+        done
+fi
+((zbTRACE)) && echo "${BLUE}TRACE:	active plugins: $plugins${NO_COLOR}" >&2
+
+parseargs "$@"
+sanity_check
+
+newline='
+'	# we'll use this as IFS
+OLDIFS="$IFS"
+
+# the array contains at least one item (the empty string)
+for BACKUPSERVER in "$backupservers[@]"; do 
+
+	( # we run this in a subshell because we keep modifying inherited variables, but each iteration should see them as they were after command line processing
+
+		# we have to source the config here so that $BACKUPSERVER can be expanded in it where needed
+
+		((zbTRACE)) && dump_state "main subshell loop before re-sourcing config"
+
+		myREMOTEBACKUPPATH="$REMOTEBACKUPPATH"	# the config can overwrite the automatically generated dynamic value with a static one; save it
+		[[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+		REMOTEBACKUPPATH=${myREMOTEBACKUPPATH:-$REMOTEBACKUPPATH}
+
+		((zbTRACE)) && dump_state "main subshell loop after re-sourcing config"
+	
+		set_zbSOURCENAME
+	
+		populate_sourcedir
+	
+		call_mksource_d
+	
+	#	set -xv
+		if ((subsources)); then
+	
+			((zbTRACE)) && dump_state "subsource start"
+			typeset -U zfs_instances	# will hold a recursive list of all child filesystems of the tree rooted at $zbzROOT
+			typeset -A zfs_mp		# a hash of zfsinstancename->mountpoint mappings
+	
+			IFS="$newline	"
+			zfs list -d 1 -r -H -o name,type $zbZROOT | while read name type; do
+				if [[ $type = filesystem ]]; then
+					zfs_instances=($zfs_instances $name)
+				elif ! [[ $type = snapshot ]]; then
+					echo "WARNING: --subsources was specified, but $zbZROOT has at least one child object that is not a filesystem. The recursive backup will not include data from $name of type $type." >&2
+				fi
+			done
+			IFS="$OLDIFS"
+	
+			for i in $zfs_instances[@]; do
+				zfs_mp[$i]="$(zfs get -Hp -o value mountpoint "$i")"
+				if [[ "$zfs_mp[$i]" = legacy ]]; then
+					# if the entire zfs subtree has legacy mountpoints, we could assume the zfs hierarchy reflects a mount hierarchy and back them up like that regardless, but I expect that to be a very rare case
+					echo "WARNING: Filesystems with legacy mountpoints are not supported for recursive snapshots; we won't include $i in the backup." >&2
+					continue
+				else
+					canmount="$(zfs get -Hp -o value canmount "$i")"
+					if [[ $canmount = off ]]; then
+						# if the origin fs can't be mounted, then its snapshot shouldn't be either
+						echo "INFO: $i with canmount=off won't be included in the backup" >&2
+						continue
+					fi
+				fi
+				[[ -z "$zfs_topmost_mp" ]] && zfs_topmost_mp=$zfs_mp[$zbPATH]
+				if [[ $zfs_mp[$i] = ${zfs_mp[$i]##$zfs_topmost_mp} ]]; then	# We try to cut off "zfs_topmost_mp" from the beginning of zfs_mp; if the result is the unchanged zfs_mp, then the mountpoint of this fs is not under our topmost mountpoint and we skip it.
+					echo "INFO: $i is mounted under '$zfs_mp[$i]', which is not under '$zfs_topmost_mp'; we won't include $i in the backup." >&2
+					continue
+				fi
+				if [[ $zfs_mp[$i] = $zfs_mp[$zbPATH] ]]; then		# Is this the zbPATH we were invoked for? If yes, don't create a sub-source for it
+					((zbTRACE)) && echo "TRACE:	$LINENO: ${(qq)i} with mountpoint ${(qq)zfs_mp[$i]} is mounted on zbPATH=${(qq)zbPATH} itself; skipping." >&2
+					continue
+				fi
+				((zbTRACE)) && echo "TRACE:	$LINENO: ${(qq)i} with mountpoint ${(qq)zfs_mp[$i]} is mounted under ${(qq)zfs_topmost_mp} and is not ${(qq)zbPATH} itself, so we'll set up a subsource for it." >&2
+				do_or_print mkdir -p $zbSOURCENAME/subsources.d
+				# recursively call ourselves, with the same arguments, but new ones overriding any earlier ones in the command line:
+				((zbTRACE)) && echo "TRACE:	Calling myself recursively as: zfsbackup-create-source $@ --path $i --zroot $i --server $BACKUPSERVER --url ${zbURL}_${i:t} --dir $zbSOURCENAME/subsources.d/${i:t} --remotepath $REMOTEBACKUPPATH/${i:t}"
+				zfsbackup-create-source "$@" --path $i --zroot $i --server $BACKUPSERVER --url ${zbURL}_${i:t} --dir $zbSOURCENAME/subsources.d/${i:t} --remotepath $REMOTEBACKUPPATH/${i:t}
+			done
+			((zbTRACE)) && dump_state "subsource end"
+		fi
+
+	)
+done # for BACKUPSERVER in $backupservers[@]; do
+
+if ((zbTRACE)) && [[ -v zbTRACEDIR ]] && [[ $zbTRACEDIR ]] && [[ $zfsbackup_create_source_nesting_level = 1 ]]; then
+	[[ /. -ef $zbTRACEDIR/. ]] && { echo "FATAL: $LINENO: zbTRACEDIR appears to be identical to the root directory" >&2; exit $err_INTERNAL }
+	[[ /. -ef ${zbTRACEDIR:h} ]] && { echo "FATAL: $LINENO: zbTRACEDIR's parent appears to be identical to the root directory" >&2; exit $err_INTERNAL }
+	pushd -q ${zbTRACEDIR:h}
+	if [[ ${(k)mapfile} = trace ]]; then	# Is the 'trace' subdir the only child? If yes, delete it, then remove the now-empty directory (no race condition: rmdir will fail if new children were created meanwhile)
+		EUID=65534 rm -rf trace
+		rmdir ${zbTRACEDIR:h}
+	else
+		echo "WARNING: zbTRACEDIR's parent ${(qq)zbTRACEDIR:h} should only contain the 'trace' subdir we created, but it doesn't, so I'm not removing it." >&2
+	fi
+fi

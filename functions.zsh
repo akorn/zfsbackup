@@ -68,8 +68,8 @@ function die() { # logs high-priority message, then exits the script with an err
 	exit 111
 }
 
-function generate_password() {
-	local length=${1:-8}
+function generate_password() { # Not currently used anywhere
+	local length=${1:-16}
 	local pwstr='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789;"[]+_-!@#$%^&*()/.,<>?'
 	if [[ -x $(which pwgen 2>/dev/null) ]]; then
 		pwgen -sy $length 1
@@ -82,6 +82,5 @@ function generate_password() {
 		else
 			for i in {1..$length}; do echo -n $pwstr[((RANDOM%$#pwstr+1))]; done
 		fi
-		echo    # output trailing newline
 	fi
 }

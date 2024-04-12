@@ -1,0 +1,105 @@
+this_plugin=create-rsyncd-conf
+
+# TODO: if creating recursive backups of a tree of filesystems, add "-r" to make-snapshot invocation
+
+function create-rsyncd-conf-init() {
+	REMOTEBACKUPPOOL=${REMOTEBACKUPPOOL:-backup}         				# first path component on remote server, e.g. /backup
+	REMOTEBACKUPPATH=${REMOTEBACKUPPATH:-${REMOTEBACKUPPATHPREFIX:-"$(hostname)"}}	# path on the remote server relative to the backup pool root
+	REMOTE_APPEND_RSYNCD_CONF=${REMOTE_APPEND_RSYNCD_CONF:-false}			# if set to true, try to ssh to remote server and write to rsyncd.conf there
+	CLIENTNAME=${CLIENTNAME:-$(hostname -f)}					# used to generate 'hosts allow = ' line in rsyncd.conf stanza
+	FAKESUPER=${FAKESUPER:-true}							# whether to use xattrs on the server to store file attributes, by setting "fake super = yes"
+	param_description[BACKUPSERVERNAME]="hostname of the backup server (autodetected from rsync url)"
+	param_description[REMOTE_APPEND_RSYNCD_CONF]="whether to try to ssh into backupserver and create an appropriate rsyncd.conf snippet there (--create-rsyncd-conf/--no-create-rsyncd-conf)"
+	param_description[CLIENTNAME]="when creating rsyncd.conf snippets for the backup server, put this string in 'hosts allow' (--clientname)"
+	param_description[BACKUPMODULE]="the auto-generated name of the write-only rsyncd 'module' for backups"
+	param_description[RESTOREMODULE]="the auto-generated name of the read-only rsyncd 'module' for restores"
+	param_description[RESTOREUSER]="the auto-generated name of the rsync user that will have read access to the RESTOREMODULE"
+	param_description[REMOTESUBDIR]="the auto-generated name of the directory under /etc/rsyncd/conf.d/ where the new rsyncd.conf snippet is placed (if REMOTE_APPEND_RSYNCD_CONF is true)"
+	param_description[REMOTERSYNCDCONF]="the full auto-generated path of the rsyncd.conf snippet we place on the backup server if REMOTE_APPEND_RSYNCD_CONF is true"
+}
+
+function create-rsyncd-conf-usage() {
+	echo "Arguments understood by plugin $this_plugin:"
+	echo "--clientname		When creating rsyncd.conf snippets for the backup server, put this string in 'hosts allow' (default: $CLIENTNAME)"
+	echo "--create-rsyncd-conf	Try to ssh into backup server to create an rsyncd.conf snippet there"
+	echo "--no-create-rsyncd-conf	Do not try to ssh into backup server to create an rsyncd.conf snippet there"
+}
+
+function create-rsyncd-conf-parseargs() {
+	((zbTRACE)) && dump_state "create-rsyncd-conf-parseargs() top"
+	case "$1" in
+		--clientname)			CLIENTNAME="$2"; parsed=1; shift=1;;
+		--create-rsyncd-conf)		REMOTE_APPEND_RSYNCD_CONF=true; parsed=1;;
+		--no-create-rsyncd-conf)	REMOTE_APPEND_RSYNCD_CONF=false; parsed=1;;
+	esac
+	((zbTRACE)) && dump_state "create-rsyncd-conf-parseargs() bottom"
+}
+
+function create-rsyncd-conf-create_stanza() {
+	echo "[$BACKUPMODULE]"
+	echo "path = /$REMOTEBACKUPPOOL/${REMOTEBACKUPPATHPREFIX:+$REMOTEBACKUPPATHPREFIX/}$REMOTEBACKUPPATH"
+	echo "hosts allow = $CLIENTNAME"
+	echo "read only = false"
+	echo "write only = true"
+	if [[ $zfsbackup_create_source_nesting_level = 1 ]]; then	# No snapshot creation for sub-sources; we'll snapshot the whole shebang from the top down when the topmost backup completes. If we're configuring a sub-source, zfsbackup_create_source_nesting_level will be >1.
+		echo -n "post-xfer exec = $SCRIPTS/server/make-snapshot"
+		((zbRECURSIVESNAPSHOT)) && echo " -r" || echo		# In a sub-source setup, only the topmost fs should have zbRECURSIVESNAPSHOT enabled; we'll configure recursive snapshots for it but plain snapshots otherwise
+	fi
+	echo "auth users = $zbUSERNAME"
+	echo "max connections = 1"
+	# disabling "fake super" involves explicitly setting uid and gid to 0
+	if [[ "$FAKESUPER" = "false" ]] || [[ "$zbFAKESUPER" = "0" ]]; then
+		echo "fake super = false"
+		echo "uid = 0"
+		echo "gid = 0"
+	fi
+	echo "lock file = /run/lock/rsync.$BACKUPMODULE.lock"
+	echo
+
+	[[ "$BACKUPMODULE" = "$RESTOREMODULE" ]] && return 0
+
+	echo "[$RESTOREMODULE]"
+	echo "path = /$REMOTEBACKUPPOOL/${REMOTEBACKUPPATHPREFIX:+$REMOTEBACKUPPATHPREFIX/}$REMOTEBACKUPPATH"
+	echo "hosts allow = $CLIENTNAME"
+	echo "read only = true"
+	echo "write only = false"
+	echo "auth users = $RESTOREUSER"
+	echo "max connections = 1"
+	if [[ "$FAKESUPER" = "false" ]] || [[ "$zbFAKESUPER" = "0" ]]; then
+		echo "fake super = false"
+		echo "uid = 0"
+		echo "gid = 0"
+	fi
+	# TODO: decide whether to include these scripts by default or only for recursive snapshots
+	echo "pre-xfer exec = $SCRIPTS/server/zfsbackup-restore-preexec"
+	echo "post-xfer exec = $SCRIPTS/server/zfsbackup-restore-postexec"
+	echo "lock file = /run/lock/rsync.$RESTOREMODULE.lock"
+	echo
+}
+
+function create-rsyncd-conf-populate_sourcedir_bottom() {
+	BACKUPSERVERNAME=${${zbURL##rsync://}%%/*}
+	BACKUPMODULE="${zbURL#rsync://$BACKUPSERVERNAME/}"
+	RESTOREMODULE="${BACKUPMODULE/backup_/restore_}"
+	RESTOREUSER=${zbUSERNAME/-writer/-reader}
+	REMOTESUBDIR=${REMOTESUBDIR:-$(hostname)}
+	REMOTERSYNCDCONF=${REMOTERSYNCDCONF:-/etc/rsyncd/conf.d/$REMOTESUBDIR/${REMOTEBACKUPPATH//\//_}}
+	((zbTRACE)) && dump_state "create-rsyncd-conf-populate_sourcedir_bottom() top"
+	if [[ "$REMOTE_APPEND_RSYNCD_CONF" = "true" ]]; then
+		echo "Attempting to append an appropriate rsyncd.conf stanza to $REMOTERSYNCDCONF on $BACKUPSERVERNAME..."
+		do_or_print ssh "$BACKUPSERVERNAME" mkdir -p ${REMOTERSYNCDCONF:h}
+		create-rsyncd-conf-create_stanza | do_or_print ssh "$BACKUPSERVERNAME" dd conv=notrunc oflag=append of=$REMOTERSYNCDCONF
+		do_or_print ssh "$BACKUPSERVERNAME" make -C /etc/rsyncd
+		if ((zbTRACE)); then
+			echo "TRACE:	generated rsyncd.conf:"
+			create-rsyncd-conf-create_stanza | sed 's/^/TRACE:\t/'
+		fi
+	else
+		echo "Please append something like the following to $REMOTERSYNCDCONF on $BACKUPSERVERNAME:"
+		echo "$YELLOW"
+		create-rsyncd-conf-create_stanza
+		echo "$NO_COLOR"
+	fi
+	echo
+	((zbTRACE)) && dump_state "create-rsyncd-conf-populate_sourcedir_bottom() bottom"
+}

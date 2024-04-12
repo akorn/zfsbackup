@@ -25,7 +25,7 @@ function bindmount_recursive() { # populates a directory with bind mounts of res
 	local mp
 	local subtree_root
 	if [[ -d $dest/. ]]; then
-		umount -R $mp # since 'max clients = 1', this is safe; if the directory is already a mountpoint, that's because a previous rsync instance died without running the post-xfer script to do the unmounting.
+		umount -R $dest # since 'max clients = 1', this is safe; if the directory is already a mountpoint, that's because a previous rsync instance died without running the post-xfer script to do the unmounting.
 		subtree_root=$(zfs get -H -o value mountpoint $zfs_dataset)
 		zfs list -t filesystem -r -H -o canmount,name,mountpoint $zfs_dataset \
 			| sed -n '/^on/s/^on[[:space:]]*//p' \

@@ -1,0 +1,37 @@
+this_plugin=zfs-set-source-props
+
+# sets korn.zfsbackup:config[$:BACKUPSERVER] to the name of the sources.d directory just created.
+#
+# TODO: if --no-xdev was specified, also set it on all child filesystems -- maybe? But what if most of those are going to be excluded manually?
+# It's unclear what the right thing to do is.
+
+function zfs-set-source-props-init() {
+	export PROPPREFIX=${PROPPREFIX:-korn.zfsbackup}
+	zbSETSOURCEPROPS=${zbSETSOURCEPROPS:-true}
+	param_description[PROPPREFIX]="the prefix of the zfs user property names the backup system uses to record some metadata (read from client.conf)"
+	param_description[zbSETSOURCEPROPS]="whether to set backup-related user properties on local filesystems (read from client.conf; --(no-)set-local-zfs-props)"
+}
+
+function zfs-set-source-props-usage() {
+	echo "Arguments understood by plugin $this_plugin:"
+	echo "--propprefix		The prefix of the zfs user property names the backup system uses to record some metadata"
+	echo "--set-local-zfs-props	Set properties on local zfs filesystems we back up"
+	echo "--no-set-local-zfs-props	Do not try to ssh into backup server to create the target filesystem"
+}
+
+function zfs-set-source-props-parseargs() {
+	((zbTRACE)) && dump_state "zfs-set-source-props-parseargs() top"
+	case "$1" in
+		--propprefix)			PROPPREFIX="$2"; parsed=1; shift=1;;
+		--set-local-zfs-props)		zbSETSOURCEPROPS=true; parsed=1;;
+		--no-set-local-zfs-props)	zbSETSOURCEPROPS=false; parsed=1;;
+	esac
+	((zbTRACE)) && dump_state "zfs-set-source-props-parseargs() bottom"
+}
+
+function zfs-set-source-props-populate_sourcedir_bottom() {
+	if [[ -n "$zbZFSDATASET" ]] && [[ $zbSETSOURCEPROPS = true ]]; then
+		((zbTRACE)) && echo setting ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" on "$zbZFSDATASET"... >&2
+		do_or_print zfs set ${PROPPREFIX:-korn.zfsbackup}:config${BACKUPSERVER:+:$BACKUPSERVER}="$zbSOURCENAME" "$zbZFSDATASET"
+	fi
+}

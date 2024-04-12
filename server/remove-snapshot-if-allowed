@@ -10,6 +10,8 @@ LOCKTIMEOUT=3600
 LOG_LEVEL=warning
 DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
 
+EXPIRY_TOLERANCE=60	# allow the destruction of snapshots that would expire in the next this many seconds, even if they haven't technically expired yet
+
 . $DEFAULT_FUNCTIONS
 [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
 [[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
@@ -52,7 +54,7 @@ expires=$(zfs get -Hp -o value ${PROPPREFIX}:expires "$1" 2>/dev/null) || {
 	die "FATAL: couldn't read ${PROPPREFIX}:expires property of \"$1\""
 }
 
-if [[ $EPOCHSECONDS -lt "$expires" ]]; then # Hasn't expired yet
+if [[ $[expires-EPOCHSECONDS] -gt $EXPIRY_TOLERANCE ]]; then # Hasn't expired yet
 	log info "$1 only expires at $(strftime %F\ %H:%M:%S $expires); not removing"
 	exit 0
 fi
