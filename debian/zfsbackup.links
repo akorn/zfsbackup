@@ -1,0 +1,3 @@
+usr/share/zfsbackup/client/mksource.d/create-remote-zfs.plugin etc/zfsbackup/mksource.d/create-remote-zfs.plugin
+usr/share/zfsbackup/client/mksource.d/create-rsyncd-conf.plugin etc/zfsbackup/mksource.d/create-rsyncd-conf.plugin
+usr/share/zfsbackup/client/mksource.d/zfs-set-source-props.plugin etc/zfsbackup/mksource.d/zfs-set-source-props.plugin

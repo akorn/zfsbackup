@@ -1,0 +1,5 @@
+zfsbackup (0.1.0) unstable; urgency=medium
+
+  * Initial release of the package.
+
+ -- Lorinc Szaray <opensource-github@carpoon.hu>  Mon, 15 Apr 2024 11:15:00 +0200

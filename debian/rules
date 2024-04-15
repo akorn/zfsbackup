@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+
+%:
+	dh $@ --with quilt
+
+override_dh_auto_install:
+	dh_quilt_patch
+	dh_auto_install -- prefix=/usr
+
+#override_dh_builddeb:
+#	dh_builddeb -- -Zxz
