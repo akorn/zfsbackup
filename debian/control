@@ -1,0 +1,15 @@
+Source: zfsbackup
+Section: admin
+Priority: optional
+Maintainer: András Korn <korn-zfsbackup@elan.rulez.org>
+Standards-Version: 4.0.0
+Build-Depends: debhelper (>= 9), quilt
+
+Package: zfsbackup
+Architecture: all
+Multi-Arch: foreign
+Depends: zsh, rsync, ${misc:Depends}
+Recommends: zfsutils-linux, openssh-client, openssh-server
+Description: Backup solution with zfs and rsync
+ A set of scripts to back up data to one or more servers using rsync
+ and automatically create/expire zfs snapshots of the backups

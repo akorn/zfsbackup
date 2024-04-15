@@ -1,0 +1,133 @@
+fix path for functions.zsh
+
+--- a/client/check-if-changed-since-snapshot
++++ b/client/check-if-changed-since-snapshot
+@@ -15,7 +15,7 @@
+ # TODO: optionally(?), use zfs diff to create a "files-from" file for rsync?
+ 
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+--- a/client/create-and-mount-snapshot
++++ b/client/create-and-mount-snapshot
+@@ -137,7 +137,7 @@
+ LVM_DEFAULT_SNAPSHOT_SUFFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
+ ZFS_DEFAULT_SNAPSHOT_NAME_PREFIX=zfsbackup${BACKUPSERVER:+-$BACKUPSERVER}
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+--- a/client/post-bindmount
++++ b/client/post-bindmount
+@@ -1,7 +1,7 @@
+ #!/bin/zsh
+ 
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+ [[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+--- a/client/pre-bindmount
++++ b/client/pre-bindmount
+@@ -1,7 +1,7 @@
+ #!/bin/zsh
+ 
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+ [[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+--- a/client/set-path-to-latest-zfs-snapshot
++++ b/client/set-path-to-latest-zfs-snapshot
+@@ -5,7 +5,7 @@
+ # Only supports case where zfs-dataset is a mounted zfs instance. TODO: support zvols
+ 
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+ [[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+--- a/client/zfsbackup-alert
++++ b/client/zfsbackup-alert
+@@ -12,7 +12,7 @@
+ SOURCES=/etc/zfsbackup/sources.d
+ LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ ALERT_LAST_SUCCESSFUL_DAYS=7	# By default, send alerts for filesytems whose backups last completed successfully 7+ days ago. Set to 0 to disable.
+ ALERT_FAILED=0			# By default, don't explicitly alert for failed backups (if they keep failing, we'll alert eventually due to a lack of success).
+--- a/client/zfsbackup-client
++++ b/client/zfsbackup-client
+@@ -6,7 +6,7 @@
+ DEFAULT_LOGFORMAT="%B %U:%G %M %l %o %i %C	%f%L"
+ export LOG_LEVEL=${LOG_LEVEL:-debug}	# override in /etc/zfsbackup/client.conf; set to "debug" during development (TODO: change default once done debugging)
+ export USE_SYSLOG=${USE_SYSLOG:-1}
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ # An array we'll put the names of the servers we're asked to back up to in.
+ typeset -U backupservers BACKUPSERVERS
+--- a/client/zfsbackup-sv
++++ b/client/zfsbackup-sv
+@@ -71,7 +71,7 @@
+ 			# with the SCHED_IDLE scheduler at nice 19, reducing its priority.
+ export SOURCES=${SOURCES:-/etc/zfsbackup/sources.d}
+ 
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/client.conf ]] && . /etc/zfsbackup/client.conf
+ [[ -r /etc/zfsbackup/${0:t}.conf ]] && . /etc/zfsbackup/${0:t}.conf
+--- a/server/make-snapshot
++++ b/server/make-snapshot
+@@ -18,7 +18,7 @@
+ SNAPSHOT_LOCK=/run/lock/zfsbackup.make-snapshot.snapshot.lock	# will get a numeric suffix for each slot specified by MAX_PARALLEL_SNAPSHOTS
+ 
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+--- a/server/pre-xfer-log
++++ b/server/pre-xfer-log
+@@ -1,6 +1,6 @@
+ #!/bin/zsh
+ USE_SYSLOG=1
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ . $DEFAULT_FUNCTIONS
+ [[ -r /etc/zfsbackup/server.conf ]] && . /etc/zfsbackup/server.conf
+--- a/server/remove-snapshot-if-allowed
++++ b/server/remove-snapshot-if-allowed
+@@ -8,7 +8,7 @@
+ LOCKTIMEOUT=3600
+ 
+ LOG_LEVEL=warning
+-DEFAULT_FUNCTIONS=/usr/local/share/zfsbackup/functions.zsh
++DEFAULT_FUNCTIONS=/usr/share/zfsbackup/functions.zsh
+ 
+ EXPIRY_TOLERANCE=60	# allow the destruction of snapshots that would expire in the next this many seconds, even if they haven't technically expired yet
+ 
+--- a/client/zfsbackup-create-source
++++ b/client/zfsbackup-create-source
+@@ -12,7 +12,7 @@
+ stdout
+ )
+ SOURCES=/etc/zfsbackup/sources.d
+-SCRIPTS=/usr/local/share/zfsbackup
++SCRIPTS=/usr/share/zfsbackup
+ DEFAULTDIR=/etc/zfsbackup/client-defaults
+ MKSOURCE_D=/etc/zfsbackup/mksource.d
+ REMOTEBACKUPPATH="$(hostname)"

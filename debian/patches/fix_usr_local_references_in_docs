@@ -1,0 +1,50 @@
+Fix /usr/local references in the documentation.
+--- a/HOWTO.md
++++ b/HOWTO.md
+@@ -13,7 +13,7 @@
+ 
+ # Client side
+ 
+-Make sure scripts are installed under /usr/local/share/zfsbackup.
++Make sure scripts are installed under /usr/share/zfsbackup.
+ 
+ ```
+ mkdir -p /etc/zfsbackup
+@@ -27,7 +27,7 @@
+ ```zsh
+ REMOTEBACKUPPREFIX=$(hostname) # Path to backups of this host, relative to backup pool root; will be used to generate commands to create necessary zfs instances
+ CLIENTNAME=$(hostname -f) # Will be placed in rsyncd.conf "hosts allow =" line; can be IP or hostname, or even both (separated by spaces)
+-SCRIPTS=/usr/local/share/zfsbackup # This is the default that will be used if you don't set this variable
++SCRIPTS=/usr/share/zfsbackup # This is the default that will be used if you don't set this variable
+ FAKESUPER=true # or false if you want to run the remote rsyncd as root and save time on xattr operations
+ 
+ # These settings are used by the zfsbackup-sv runit service:
+@@ -62,7 +62,7 @@
+ # Path to sources.d directories:
+ SOURCES=/etc/zfsbackup/sources.d${BACKUPSERVER:+/$BACKUPSERVER}
+ # Path to scripts shipped with zfsbackup:
+-SCRIPTS=/usr/local/share/zfsbackup
++SCRIPTS=/usr/share/zfsbackup
+ # Path to default settings for new sources.d directories:
+ DEFAULTDIR=/etc/zfsbackup/client-defaults${BACKUPSERVER:+/$BACKUPSERVER}
+ # Path to directory with script to run after zfsbackup-create-source:
+--- a/README.md
++++ b/README.md
+@@ -213,7 +213,7 @@
+ # Path to sources.d directory:
+ SOURCES=/etc/zfsbackup/sources.d
+ # Path to scripts shipped with zfsbackup:
+-SCRIPTS=/usr/local/share/zfsbackup
++SCRIPTS=/usr/share/zfsbackup
+ # Path to default settings for new sources.d directories:
+ DEFAULTDIR=/etc/zfsbackup/client-defaults
+ # Path to directory with script to run after zfsbackup-create-source:
+@@ -293,7 +293,7 @@
+ # Path to sources.d directories:
+ SOURCES=/etc/zfsbackup/sources.d${BACKUPSERVER:+/$BACKUPSERVER}
+ # Path to scripts shipped with zfsbackup:
+-SCRIPTS=/usr/local/share/zfsbackup
++SCRIPTS=/usr/share/zfsbackup
+ # Path to default settings for new sources.d directories:
+ DEFAULTDIR=/etc/zfsbackup/client-defaults${BACKUPSERVER:+/$BACKUPSERVER}
+ # Path to directory with script to run after zfsbackup-create-source:
